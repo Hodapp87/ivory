@@ -7,7 +7,8 @@
 {-# LANGUAGE TypeOperators #-}
 
 module Ivory.Language.Coroutine (
-  Coroutine(..), CoroutineBody(..), coroutine
+  Coroutine(..), CoroutineBody(..), coroutine,
+  Continuation(..), ContBody(..), continuation
 ) where
 
 import Control.Applicative
@@ -47,7 +48,7 @@ newtype CoroutineBody a =
                  (forall b.
                   Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)) ->
                          Ivory (ProcEffects s2 ()) ())
-
+                         
 coroutine :: forall a. IvoryArea a => String -> CoroutineBody a -> Coroutine a
 coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   where
@@ -100,6 +101,73 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
       { AST.modStructs = visAcc visibility strDef
       , AST.modAreas = visAcc visibility cont
       }
+
+
+data Continuation a = Continuation
+  { contName :: String
+  , contRun :: forall eff s s'. GetAlloc eff ~ Scope s' => IBool -> a -> Ivory eff ()
+  , contDef :: ModuleDef
+  }
+
+newtype ContBody a =
+  ContBody (forall s1 s2.
+                 (forall b.
+                  Ivory ('Effects (Returns ()) b (Scope s2)) a) ->
+                         Ivory (ProcEffects s2 ()) ())
+
+continuation :: forall a. IvoryVar a => String -> ContBody a -> Continuation a
+continuation name (ContBody fromYield) = Continuation { .. }
+  where
+  ((), CodeBlock { blockStmts = rawCode }) = runIvory $ fromYield $ call (proc yieldName $ body $ return ())
+
+  params = CoroutineParams
+    { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
+    , getBreakLabel = error "Ivory.Language.Coroutine: no break label set, but breakOut called"
+    }
+
+  initialState = CoroutineState
+    { rewrites = Map.empty
+    , labels = []
+    , derefs = 0
+    }
+
+  -- Even the initial block needs a label, in case there's a yield or
+  -- return before any control flow statements. Otherwise, the resulting
+  -- resumeAt call will emit a 'break;' statement outside of the
+  -- forever-loop that the state machine runs in, which is invalid C.
+  initCode = makeLabel' =<< getBlock rawCode (resumeAt 0)
+  (((initLabel, _), (localVars, resumes)), finalState) = MonadLib.runM initCode params initialState
+  initBB = BasicBlock [] $ BranchTo False initLabel
+
+  strName = name ++ "_continuation"
+  strDef = AST.Struct strName $ AST.Typed stateType stateName : D.toList localVars
+  strTy = AST.TyStruct strName
+  cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
+
+  contName = name
+
+  litLabel = AST.ExpLit . AST.LitInteger . fromIntegral
+
+  genBB (BasicBlock pre term) = pre ++ case term of
+    BranchTo suspend label -> (AST.Store stateType (getCont params stateName) $ litLabel label) : if suspend then [AST.Break] else []
+    CondBranchTo cond tb fb -> [AST.IfTE cond (genBB tb) (genBB fb)]
+
+  contRun :: IBool -> a -> Ivory eff ()
+  contRun doInit arg = do
+    ifte_ doInit (emits mempty { blockStmts = genBB initBB }) (return ())
+    emit $ AST.Forever $ (AST.Deref stateType (AST.VarName stateName) $ getCont params stateName) : do
+      (label, block) <- keepUsedBlocks initLabel $ zip [0..] $ map joinTerminators $ (BasicBlock [] $ BranchTo True 0) : reverse (labels finalState)
+      let cond = AST.ExpOp (AST.ExpEq stateType) [AST.ExpVar (AST.VarName stateName), litLabel label]
+      let b' = Map.findWithDefault (const []) label resumes (unwrapExpr arg) ++ genBB block
+      return $ AST.IfTE cond b' []
+
+  contDef = do
+    visibility <- MonadLib.ask
+    MonadLib.put $ mempty
+      { AST.modStructs = visAcc visibility strDef
+      , AST.modAreas = visAcc visibility cont
+      }
+
 
 yieldName :: String
 yieldName = "+yield" -- not a valid C identifier, so can't collide with a real proc
@@ -279,16 +347,35 @@ addLocal ty var = do
   return cont
 
 addYield :: AST.Type -> AST.Var -> CoroutineMonad Terminator -> CoroutineMonad Terminator
-addYield ty var rest = do
-  let AST.TyRef derefTy = ty
-  let AST.VarName varStr = var
-  MonadLib.lift $ MonadLib.put (D.singleton $ AST.Typed derefTy varStr, mempty)
-  cont <- contRef var
-  var `rewriteTo` return cont
-  after <- makeLabel' =<< getBlock [] rest
-  let resume arg = [AST.RefCopy derefTy cont arg]
-  MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
-  resumeAt after
+addYield ty var rest = 
+  case ty of (AST.TyRef derefTy) -> do
+               let AST.VarName varStr = var
+               MonadLib.lift $ MonadLib.put (D.singleton $ AST.Typed derefTy varStr, mempty)
+               cont <- contRef var
+               var `rewriteTo` return cont
+               after <- makeLabel' =<< getBlock [] rest
+               let resume arg = [AST.RefCopy derefTy cont arg]
+               MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
+               resumeAt after
+             (AST.TyProc ptr _) -> do
+               -- The AST.TyRef guard does not catch this, but AST.TyProc does.
+               -- However, I don't know what it gets me. If I simply make it a
+               -- catch-all and use 'ty' instead, the results appear to be the
+               -- same.
+               let AST.VarName varStr = var
+               MonadLib.lift $ MonadLib.put (D.singleton $ AST.Typed ptr varStr, mempty)
+
+               -- Responsible for n_r0(?):
+               cont <- contRef var
+               var `rewriteTo` return cont
+               
+               after <- makeLabel' =<< getBlock [] rest
+
+               -- Responsible for copying value:
+               let resume arg = [AST.RefCopy ptr cont arg]
+               MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
+               
+               resumeAt after
 
 setBreakLabel :: Terminator -> CoroutineMonad a -> CoroutineMonad a
 setBreakLabel label m = do
