@@ -11,6 +11,9 @@ module Ivory.Language.Coroutine (
   Continuation(..), ContBody(..), continuation
 ) where
 
+-- CMH, debug
+import Debug.Trace
+
 import Control.Applicative
 import Control.Monad
 import Control.Monad.Fix
@@ -48,7 +51,7 @@ newtype CoroutineBody a =
                  (forall b.
                   Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)) ->
                          Ivory (ProcEffects s2 ()) ())
-                         
+
 coroutine :: forall a. IvoryArea a => String -> CoroutineBody a -> Coroutine a
 coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   where
@@ -119,6 +122,15 @@ continuation :: forall a. IvoryVar a => String -> ContBody a -> Continuation a
 continuation name (ContBody fromYield) = Continuation { .. }
   where
   ((), CodeBlock { blockStmts = rawCode }) = runIvory $ fromYield $ call (proc yieldName $ body $ return ())
+  -- This appears to operate by passing a call to a function called "+yield"
+  -- (or yieldName), and this call is then extracted later and replaced.
+  -- This is curiously close to what I'm trying to do anyway.
+
+  -- I am trying to figure out how this "+yield" is turned to the variable name
+  -- that then needs to be mangled.
+  -- Names.hs has VarName for this, but also has VarLitName for names that
+  -- should not be mangled.  An un-mangled name would also not be correct,
+  -- though.
 
   params = CoroutineParams
     { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
@@ -242,21 +254,30 @@ type CoroutineMonad = MonadLib.WriterT (D.DList AST.Stmt) (MonadLib.ReaderT Coro
 extractLocals :: AST.Stmt -> CoroutineMonad Terminator -> CoroutineMonad Terminator
 extractLocals (AST.IfTE cond tb fb) rest = do
   after <- makeLabel rest
-  CondBranchTo <$> runUpdateExpr (updateExpr cond) <*> getBlock tb (return after) <*> getBlock fb (return after)
-extractLocals (AST.Assert cond) rest = (AST.Assert <$> runUpdateExpr (updateExpr cond)) >>= stmt >> rest
-extractLocals (AST.CompilerAssert cond) rest = (AST.CompilerAssert <$> runUpdateExpr (updateExpr cond)) >>= stmt >> rest
-extractLocals (AST.Assume cond) rest = (AST.Assume <$> runUpdateExpr (updateExpr cond)) >>= stmt >> rest
+  CondBranchTo <$> runUpdateExpr (updateExpr_ cond) <*> getBlock tb (return after) <*> getBlock fb (return after)
+extractLocals (AST.Assert cond) rest = (AST.Assert <$> runUpdateExpr (updateExpr_ cond)) >>= stmt >> rest
+extractLocals (AST.CompilerAssert cond) rest = (AST.CompilerAssert <$> runUpdateExpr (updateExpr_ cond)) >>= stmt >> rest
+extractLocals (AST.Assume cond) rest = (AST.Assume <$> runUpdateExpr (updateExpr_ cond)) >>= stmt >> rest
 extractLocals (AST.Return {}) _ = error "Ivory.Language.Coroutine: can't return a value from the coroutine body"
 -- XXX: this discards any code after a return. is that OK?
 extractLocals (AST.ReturnVoid) _ = resumeAt 0
-extractLocals (AST.Deref ty var ex) rest = (AST.RefCopy ty <$> addLocal ty var <*> runUpdateExpr (updateExpr ex)) >>= stmt >> rest
-extractLocals (AST.Store ty lhs rhs) rest = (runUpdateExpr $ AST.Store ty <$> updateExpr lhs <*> updateExpr rhs) >>= stmt >> rest
-extractLocals (AST.Assign ty var ex) rest = (AST.Store ty <$> addLocal ty var <*> runUpdateExpr (updateExpr ex)) >>= stmt >> rest
+extractLocals (AST.Deref ty var ex) rest = (AST.RefCopy ty <$> addLocal ty var <*> runUpdateExpr (updateExpr_ ex)) >>= stmt >> rest
+extractLocals (AST.Store ty lhs rhs) rest = (runUpdateExpr $ AST.Store ty <$> updateExpr_ lhs <*> updateExpr_ rhs) >>= stmt >> rest
+extractLocals (AST.Assign ty var ex) rest = (AST.Store ty <$> addLocal ty var <*> runUpdateExpr (updateExpr_ ex)) >>= stmt >> rest
 extractLocals (AST.Call ty mvar name args) rest
-  | name == AST.NameSym yieldName = do
+  | name == AST.NameSym yieldName = trace "name == AST.NameSym branch" $ do
     let (Just var, []) = (mvar, args) -- XXX: yield takes no arguments and always returns something
     addYield ty var rest
-  | otherwise = do
+    -- CMH: In this branch the result of that function call is 'assigned' to
+    -- a variable name inside the continuation, and it appears to me that this
+    -- name makes its way into the returned value somehow.
+    -- This assignment does however occur to the continuation struct (and it
+    -- looks like addYield takes care of this) with the correct name.
+    -- addField receives this name in some form.
+    -- The 'indirect_' call then picks up a name that requires mangling but has
+    -- never been allocated (nor is the un-mangled name useful).
+    -- So, how does the name make its way to the return value?
+  | otherwise = trace "otherwise branch" $ do
     stmt =<< AST.Call ty mvar name <$> runUpdateExpr (mapM updateTypedExpr args)
     case mvar of
       Nothing -> return ()
@@ -275,7 +296,7 @@ extractLocals (AST.Local ty var initex) rest = do
     , AST.RefCopy ty cont $ AST.ExpVar ref
     ]
   rest
-extractLocals (AST.RefCopy ty lhs rhs) rest = (runUpdateExpr $ AST.RefCopy ty <$> updateExpr lhs <*> updateExpr rhs) >>= stmt >> rest
+extractLocals (AST.RefCopy ty lhs rhs) rest = (runUpdateExpr $ AST.RefCopy ty <$> updateExpr_ lhs <*> updateExpr_ rhs) >>= stmt >> rest
 extractLocals (AST.AllocRef _ty refvar name) rest = do
   let AST.NameVar var = name -- XXX: AFAICT, AllocRef can't have a NameSym argument.
   refvar `rewriteTo` contRef var
@@ -283,27 +304,31 @@ extractLocals (AST.AllocRef _ty refvar name) rest = do
 extractLocals (AST.Loop var initEx incr b) rest = do
   let ty = ivoryType (Proxy :: Proxy IxRep)
   cont <- addLocal ty var
-  stmt =<< AST.Store ty cont <$> runUpdateExpr (updateExpr initEx)
+  stmt =<< AST.Store ty cont <$> runUpdateExpr (updateExpr_ initEx)
   after <- makeLabel rest
   mfix $ \ loop -> makeLabel $ do
     let (condOp, incOp, limitEx) = case incr of
           AST.IncrTo ex -> (AST.ExpGt, AST.ExpAdd, ex)
           AST.DecrTo ex -> (AST.ExpLt, AST.ExpSub, ex)
-    cond <- runUpdateExpr $ updateExpr $ AST.ExpOp (condOp False ty) [AST.ExpVar var, limitEx]
+    cond <- runUpdateExpr $ updateExpr_ $ AST.ExpOp (condOp False ty) [AST.ExpVar var, limitEx]
     CondBranchTo cond (BasicBlock [] after) <$> do
       setBreakLabel after $ getBlock b $ do
-        stmt =<< AST.Store ty cont <$> runUpdateExpr (updateExpr $ AST.ExpOp incOp [AST.ExpVar var, AST.ExpLit (AST.LitInteger 1)])
+        stmt =<< AST.Store ty cont <$> runUpdateExpr (updateExpr_ $ AST.ExpOp incOp [AST.ExpVar var, AST.ExpLit (AST.LitInteger 1)])
         return loop
 extractLocals (AST.Forever b) rest = do
   after <- makeLabel rest
-  mfix $ \ loop -> makeLabel $ setBreakLabel after $ foldr extractLocals (return loop) b
+  mfix $ \ loop -> makeLabel $ setBreakLabel after $ foldr extractLocals_ (return loop) b
 -- XXX: this discards any code after a break. is that OK?
 extractLocals (AST.Break) _ = MonadLib.asks getBreakLabel
 extractLocals s@(AST.Comment{}) rest = stmt s >> rest
 
+-- CMH
+extractLocals_ :: AST.Stmt -> CoroutineMonad Terminator -> CoroutineMonad Terminator
+extractLocals_ a = trace ("extractLocals: " ++ show a) $ extractLocals a
+
 getBlock :: AST.Block -> CoroutineMonad Terminator -> CoroutineMonad BasicBlock
 getBlock b next = do
-  (term, b') <- MonadLib.collect $ foldr extractLocals next b
+  (term, b') <- MonadLib.collect $ foldr extractLocals_ next b
   return $ BasicBlock (D.toList b') term
 
 makeLabel :: CoroutineMonad Terminator -> CoroutineMonad Terminator
@@ -347,7 +372,8 @@ addLocal ty var = do
   return cont
 
 addYield :: AST.Type -> AST.Var -> CoroutineMonad Terminator -> CoroutineMonad Terminator
-addYield ty var rest = 
+addYield ty var rest =
+  trace ("addYield ty=" ++ show ty ++ ", var=" ++ show var) $ do
   case ty of (AST.TyRef derefTy) -> do
                let AST.VarName varStr = var
                MonadLib.lift $ MonadLib.put (D.singleton $ AST.Typed derefTy varStr, mempty)
@@ -357,22 +383,23 @@ addYield ty var rest =
                let resume arg = [AST.RefCopy derefTy cont arg]
                MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
                resumeAt after
-             (AST.TyProc ptr _) -> do
-               -- The AST.TyRef guard does not catch this, but AST.TyProc does.
-               -- However, I don't know what it gets me. If I simply make it a
-               -- catch-all and use 'ty' instead, the results appear to be the
-               -- same.
+             (AST.TyProc _ _) -> do
+               -- The argument to TyProc appears to just be void type (which is
+               -- not useful to us), however, the above pattern match works.
                let AST.VarName varStr = var
-               MonadLib.lift $ MonadLib.put (D.singleton $ AST.Typed ptr varStr, mempty)
+               MonadLib.lift $ MonadLib.put
+                 (D.singleton $ AST.Typed ty varStr, mempty)
 
                -- Responsible for n_r0(?):
                cont <- contRef var
+               -- Responsible for ????:
                var `rewriteTo` return cont
                
                after <- makeLabel' =<< getBlock [] rest
 
-               -- Responsible for copying value:
-               let resume arg = [AST.RefCopy ptr cont arg]
+               -- Responsible for copying value (do we even need this?):
+               let resume arg = [AST.RefCopy ty cont arg]
+               
                MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
                
                resumeAt after
@@ -383,7 +410,7 @@ setBreakLabel label m = do
   MonadLib.local (params { getBreakLabel = label }) m
 
 stmt :: AST.Stmt -> CoroutineMonad ()
-stmt = MonadLib.put . D.singleton
+stmt s = trace ("stmt " ++ show s) $ MonadLib.put $ D.singleton s
 
 stmts :: AST.Block -> CoroutineMonad ()
 stmts = MonadLib.put . D.fromList
@@ -396,6 +423,9 @@ type UpdateExpr a = MonadLib.StateT (Map.Map AST.Var AST.Expr) CoroutineMonad a
 runUpdateExpr :: UpdateExpr a -> CoroutineMonad a
 runUpdateExpr = fmap fst . MonadLib.runStateT Map.empty
 
+updateExpr_ :: AST.Expr -> UpdateExpr AST.Expr
+updateExpr_ a = trace ("updateExpr " ++ show a) $ updateExpr a
+
 updateExpr :: AST.Expr -> UpdateExpr AST.Expr
 updateExpr ex@(AST.ExpVar var) = do
   updated <- MonadLib.get
@@ -406,18 +436,20 @@ updateExpr ex@(AST.ExpVar var) = do
         Map.findWithDefault (return ex) var =<< fmap rewrites MonadLib.get
       MonadLib.sets_ $ Map.insert var ex'
       return ex'
-updateExpr (AST.ExpLabel ty ex label) = AST.ExpLabel ty <$> updateExpr ex <*> pure label
-updateExpr (AST.ExpIndex ty1 ex1 ty2 ex2) = AST.ExpIndex <$> pure ty1 <*> updateExpr ex1 <*> pure ty2 <*> updateExpr ex2
-updateExpr (AST.ExpToIx ex bound) = AST.ExpToIx <$> updateExpr ex <*> pure bound
-updateExpr (AST.ExpSafeCast ty ex) = AST.ExpSafeCast ty <$> updateExpr ex
-updateExpr (AST.ExpOp op args) = AST.ExpOp op <$> mapM updateExpr args
+updateExpr (AST.ExpLabel ty ex label) = AST.ExpLabel ty <$> updateExpr_ ex <*> pure label
+updateExpr (AST.ExpIndex ty1 ex1 ty2 ex2) = AST.ExpIndex <$> pure ty1 <*> updateExpr_ ex1 <*> pure ty2 <*> updateExpr_ ex2
+updateExpr (AST.ExpToIx ex bound) = AST.ExpToIx <$> updateExpr_ ex <*> pure bound
+updateExpr (AST.ExpSafeCast ty ex) = AST.ExpSafeCast ty <$> updateExpr_ ex
+updateExpr (AST.ExpOp op args) = AST.ExpOp op <$> mapM updateExpr_ args
 updateExpr ex = return ex
 
 updateInit :: AST.Init -> UpdateExpr AST.Init
 updateInit AST.InitZero = return AST.InitZero
-updateInit (AST.InitExpr ty ex) = AST.InitExpr ty <$> updateExpr ex
+updateInit (AST.InitExpr ty ex) = AST.InitExpr ty <$> updateExpr_ ex
 updateInit (AST.InitStruct fields) = AST.InitStruct <$> mapM (\ (name, ex) -> (,) name <$> updateInit ex) fields
 updateInit (AST.InitArray elems) = AST.InitArray <$> mapM updateInit elems
 
 updateTypedExpr :: AST.Typed AST.Expr -> UpdateExpr (AST.Typed AST.Expr)
-updateTypedExpr (AST.Typed ty ex) = AST.Typed ty <$> updateExpr ex
+updateTypedExpr (AST.Typed ty ex) =
+  trace ("updateTypedExpr AST.Typed ty=" ++ show ty ++ ", ex=" ++ show ex) $
+  AST.Typed ty <$> updateExpr_ ex
