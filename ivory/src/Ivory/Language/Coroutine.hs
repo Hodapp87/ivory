@@ -277,6 +277,28 @@ extractLocals (AST.Call ty mvar name args) rest
     -- The 'indirect_' call then picks up a name that requires mangling but has
     -- never been allocated (nor is the un-mangled name useful).
     -- So, how does the name make its way to the return value?
+
+    -- If I call something else via 'indirect' I see the name emerge as a
+    -- NameSym (rather than a NameVar & VarName).
+
+    -- The variable holding the result of the +yield call appears to be out of
+    -- sync with what is actually returned to the monad, but what do I change
+    -- to get them back in sync?
+
+    -- The normal Ivory coroutines always employ a 'deref' after the yield,
+    -- so perhaps is the AST.Deref intercepted and patched in some way?
+    -- I see that they add a RefCopy & addLocal there, and indeed I see in
+    -- some examples that this generates a new local variable and that
+    -- operations are then done on this.
+
+    -- So... is the result of this function call invalid, because no actual
+    -- function call exists?  If this is the case then how does it become
+    -- valid through a 'deref'?
+
+    -- Further, how can I apply this?  I can't put a 'deref' here - the type
+    -- system will not allow it.  What can I modify about this fake function
+    -- call, *and* propagate back to the monad?
+    -- Is this what 'runUpdateExpr' is for?
   | otherwise = trace "otherwise branch" $ do
     stmt =<< AST.Call ty mvar name <$> runUpdateExpr (mapM updateTypedExpr args)
     case mvar of
@@ -394,11 +416,14 @@ addYield ty var rest =
                cont <- contRef var
                -- Responsible for ????:
                var `rewriteTo` return cont
-               
+
                after <- makeLabel' =<< getBlock [] rest
 
                -- Responsible for copying value (do we even need this?):
-               let resume arg = [AST.RefCopy ty cont arg]
+               let resume arg =
+                     [trace ("resume AST.RefCopy ty=" ++ show ty ++
+                             ", cont=" ++ show cont ++ ", arg=" ++
+                             show arg) $ AST.RefCopy ty cont arg]
                
                MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
                
