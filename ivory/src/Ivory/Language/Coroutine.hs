@@ -324,6 +324,17 @@ extractLocals (AST.Call ty mvar name args) rest
     -- Is this what 'runUpdateExpr' is for?
   | otherwise = trace "otherwise branch" $ do
     stmt =<< AST.Call ty mvar name <$> runUpdateExpr (mapM updateTypedExpr args)
+    -- CMH: updateTypedExpr runs here on the arguments of the function, and it
+    -- does not run in the prior branch.
+    -- I suppose I could do two things: Run it on the result of the +yield
+    -- pseudo-call, or run it on the call that comes after. I cannot tell apart
+    -- the call that comes after from any other function call - but does this
+    -- matter, if I am only replacing certain variables selectively (according
+    -- to what is in the map)?
+    -- The normal coroutine code does it on the variable reference that occurs
+    -- as a result of the normal operations on the variable - I think?  It
+    -- appears to also emit a new variable declaration & definition at the
+    -- spot as well.  (I guess that's what the code below does?)
     case mvar of
       Nothing -> return ()
       Just var -> do
@@ -471,6 +482,8 @@ stmt s = trace ("stmt " ++ show s) $ MonadLib.put $ D.singleton s
 stmts :: AST.Block -> CoroutineMonad ()
 stmts = MonadLib.put . D.fromList
 
+-- | Inside of a 'CoroutineMonad', rewrite the given variable name to the
+-- contained expression.
 rewriteTo :: AST.Var -> CoroutineMonad AST.Expr -> CoroutineMonad ()
 rewriteTo var repl =
   MonadLib.sets_ $ \state -> state
@@ -478,22 +491,41 @@ rewriteTo var repl =
 
 type UpdateExpr a = MonadLib.StateT (Map.Map AST.Var AST.Expr) CoroutineMonad a
 
+-- | Apply the given variable updates
 runUpdateExpr :: UpdateExpr a -> CoroutineMonad a
 runUpdateExpr = fmap fst . MonadLib.runStateT Map.empty
 
+-- CMH
 updateExpr_ :: AST.Expr -> UpdateExpr AST.Expr
 updateExpr_ a = trace ("updateExpr " ++ show a) $ updateExpr a
 
+-- CMH: updateExpr seems to update an expression in the AST with some
+-- replacements.  If I'm reading that right, it does so with the Map that is
+-- in UpdateExpr.  This appears to be just a recursive application of
+-- updateExpr in all sub-expressions - except for with AST.ExpVar, which looks
+-- up replacements in 'UpdateExpr'.
+-- This never appears to run on 'indirect' - only on 'deref'.  I believe
+-- 'extractLocals' never runs it on AST.Call.  And it would do us no good -
+-- it inspects expressions, but AST.Call is a statement, not an expression, and
+-- it contains no expressions that require updating - only a result variable
+-- and a name.
+-- I could replace one of those variables according to the map, but I'd be
+-- replacing it with an expression - and I can't call an expression, or assign
+-- to one.  So, an updateCall counterpart wouldn't be readily usable.
+--
+-- The basic disconnect here appears to be that 'AST.Deref' operates on
+-- expressions, and this code can handle updating expressions, but 'AST.Call'
+-- operates on variables or variable names.
 updateExpr :: AST.Expr -> UpdateExpr AST.Expr
 updateExpr ex@(AST.ExpVar var) = do
   updated <- MonadLib.get
   case Map.lookup var updated of
-    Just ex' -> return ex'
+    Just ex' -> trace ("  updateExpr: unchanged AST.ExpVar") $ return ex'
     Nothing -> do
       ex' <- MonadLib.lift $ do
         Map.findWithDefault (return ex) var =<< fmap rewrites MonadLib.get
       MonadLib.sets_ $ Map.insert var ex'
-      return ex'
+      trace ("  updateExpr: new " ++ show ex') $ return ex'
 updateExpr (AST.ExpLabel ty ex label) =
   AST.ExpLabel ty <$> updateExpr_ ex <*> pure label
 updateExpr (AST.ExpIndex ty1 ex1 ty2 ex2) =
