@@ -474,26 +474,19 @@ addYield ty var rest =
 
                -}
                -- Responsible for n_r0(?):
-               cont <- contRef var
-               {-
+               -- cont <- contRef var
                -- Responsible for ????:
-               var `rewriteTo` return cont
+               -- var `rewriteTo` return cont
 
-               -}
                after <- makeLabel' =<< getBlock [] rest
-               {-
 
                -- Responsible for copying value (do we even need this?):
-               let resume arg =
-                     [trace ("resume AST.RefCopy ty=" ++ show ty ++
-                             ", cont=" ++ show cont ++ ", arg=" ++
-                             show arg) $ AST.RefCopy ty cont arg]
+               let resume arg = [AST.Local ty var $ AST.InitExpr ty $ arg]
                
                MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
-               -}
 
-               stmt $ AST.Local ty var $ AST.InitExpr ty $ cont
-               stmt $ AST.Call r Nothing (AST.NameVar var) []
+               -- stmt $ 
+               --stmt $ AST.Call r Nothing (AST.NameVar var) []
                -- CMH, TODO: Fix Nothing (need to store result)
                -- Big TODO: The arguments are incorrect on this. I will need
                -- to update the type signature of the function that is passed
