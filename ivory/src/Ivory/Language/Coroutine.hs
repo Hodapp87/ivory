@@ -281,6 +281,7 @@ extractLocals (AST.ReturnVoid) _ = resumeAt 0
 extractLocals (AST.Deref ty var ex) rest =
   (AST.RefCopy ty <$> addLocal ty var <*> runUpdateExpr (updateExpr_ ex)) >>=
   stmt >> rest
+  -- CMH: Note here that a Deref also emits a RefCopy and another local.
 extractLocals (AST.Store ty lhs rhs) rest =
   (runUpdateExpr $ AST.Store ty <$> updateExpr_ lhs <*> updateExpr_ rhs) >>=
   stmt >> rest
@@ -471,6 +472,32 @@ addYield ty var rest =
                
                resumeAt after
 
+               -- If I am calling this ProcPtr separately then I don't think I
+               -- can do anything in this branch - I have to correct the name
+               -- elsewhere.
+               -- 
+               -- But what about if I insert a call directly here?  This would
+               -- change semantics somewhat.  But would it matter?  The
+               -- Haskell code can still pass it around as a first-class value,
+               -- but it cannot store it in a C variable, only pass it to other
+               -- continuations.
+               -- I see two potential problems: How would I get the return
+               -- value of the continuation, and how would I pass values to it?
+               -- These are both trivial if I have a ProcPtr which I call with
+               -- 'indirect'.
+               -- However, to do this without 'indirect' I would have to
+               -- fundamentally change the type of 'yield' that is passed to
+               -- the function for the psuedo-call in order for it to
+               -- comprehend arguments and return values.
+               -- That *might* be doable. I could change the signature of the
+               -- pseudo-call based on what the ProcPtr is parametrized over,
+               -- then it would be a matter of changing its name to properly
+               -- reflect the function that was passed in.  (And that would
+               -- be constant: It's one of the function arguments.)
+               -- This breaks from how Coroutine works, in which the
+               -- pseudo-call signature is unconnected to the type of the
+               -- coroutine itself.  But is that much of an issue?
+
 setBreakLabel :: Terminator -> CoroutineMonad a -> CoroutineMonad a
 setBreakLabel label m = do
   params <- MonadLib.ask
@@ -516,6 +543,12 @@ updateExpr_ a = trace ("updateExpr " ++ show a) $ updateExpr a
 -- The basic disconnect here appears to be that 'AST.Deref' operates on
 -- expressions, and this code can handle updating expressions, but 'AST.Call'
 -- operates on variables or variable names.
+-- I could perhaps allocate a Local to address this and initialize it with an
+-- InitExpr and the Expr in question.
+--
+-- This has the problem of generating unnecessary locals for every single
+-- function call though, unless we only generate a local if the map contains
+-- a replacement expression.
 updateExpr :: AST.Expr -> UpdateExpr AST.Expr
 updateExpr ex@(AST.ExpVar var) = do
   updated <- MonadLib.get
@@ -538,13 +571,20 @@ updateExpr (AST.ExpOp op args) =
   AST.ExpOp op <$> mapM updateExpr_ args
 updateExpr ex = return ex
 
+-- | Update an initializer with the variable replacements in the given
+-- 'UpdateExpr'
 updateInit :: AST.Init -> UpdateExpr AST.Init
 updateInit AST.InitZero = return AST.InitZero
 updateInit (AST.InitExpr ty ex) =
+  -- 'AST.InitExpr' contains an expression that 'updateExpr' needs to handle:
   AST.InitExpr ty <$> updateExpr_ ex
 updateInit (AST.InitStruct fields) =
+  -- Every field of a @struct@ in an 'AST.InitStruct' contains an expression
+  -- that must go through 'updateExpr':
   AST.InitStruct <$> mapM (\ (name, ex) -> (,) name <$> updateInit ex) fields
-updateInit (AST.InitArray elems) = AST.InitArray <$> mapM updateInit elems
+updateInit (AST.InitArray elems) =
+  -- An 'AST.InitArray' is a list of 'AST.Init' which we must recurse over:
+  AST.InitArray <$> mapM updateInit elems
 
 updateTypedExpr :: AST.Typed AST.Expr -> UpdateExpr (AST.Typed AST.Expr)
 updateTypedExpr (AST.Typed ty ex) =
