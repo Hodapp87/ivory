@@ -46,6 +46,9 @@ data Coroutine a = Coroutine
   , coroutineDef :: ModuleDef
   }
 
+-- If I want to write Coroutine in terms of Continuation, then how do I get
+-- that 'ConstRef s a' part when it's in an existential?
+
 newtype CoroutineBody a =
   CoroutineBody (forall s1 s2.
                  (forall b.
@@ -110,15 +113,16 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
 
 data Continuation a = Continuation
   { contName :: String
-  , contRun :: forall eff s s'. GetAlloc eff ~ Scope s' => IBool -> a -> Ivory eff ()
+  , contRun :: forall eff s s' .
+               GetAlloc eff ~ Scope s' => IBool -> a -> Ivory eff ()
   , contDef :: ModuleDef
   }
 
 newtype ContBody a =
-  ContBody (forall s1 s2.
+  ContBody (forall s.
                  (forall b.
-                  Ivory ('Effects (Returns ()) b (Scope s2)) a) ->
-                         Ivory (ProcEffects s2 ()) ())
+                  Ivory ('Effects (Returns ()) b (Scope s)) a) ->
+                         Ivory (ProcEffects s ()) ())
 
 continuation :: forall a. IvoryVar a => String -> ContBody a -> Continuation a
 continuation name (ContBody fromYield) = Continuation { .. }
