@@ -143,6 +143,10 @@ continuation name (ContBody fromYield) = Continuation { .. }
   -- enough.  If I get the type signature right, then I could close the loop
   -- in the AST later (instead of turning this into the dereferences and such).
 
+  -- Why I'm not doing this approach currently is that changing the type of
+  -- this pseudo-call is resulting in a world of pain when it comes to type
+  -- signatures.
+
   params = CoroutineParams
     { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
     , getBreakLabel =
