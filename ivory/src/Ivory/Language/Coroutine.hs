@@ -55,7 +55,8 @@ newtype CoroutineBody a =
 coroutine :: forall a. IvoryArea a => String -> CoroutineBody a -> Coroutine a
 coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   where
-  ((), CodeBlock { blockStmts = rawCode }) = runIvory $ fromYield $ call (proc yieldName $ body $ return ())
+  ((), CodeBlock { blockStmts = rawCode }) =
+    runIvory $ fromYield $ call (proc yieldName $ body $ return ())
 
   params = CoroutineParams
     { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
@@ -126,17 +127,26 @@ continuation name (ContBody fromYield) = Continuation { .. }
     runIvory $ fromYield $ call (proc yieldName $ body $ return ())
   -- This appears to operate by passing a call to a function called "+yield"
   -- (or yieldName), and this call is then extracted later and replaced.
-  -- This is curiously close to what I'm trying to do anyway.
 
-  -- I am trying to figure out how this "+yield" is turned to the variable name
-  -- that then needs to be mangled.
-  -- Names.hs has VarName for this, but also has VarLitName for names that
-  -- should not be mangled.  An un-mangled name would also not be correct,
-  -- though.
+  -- If I want to do what I discuss elsewhere and have 'yield' actually *be*
+  -- a function call, I will need to replace the above placeholder function
+  -- with some ProcPtr which will be one of the arguments to the generated
+  -- code.
+  -- However, then a continuation can be parametrized only over ProcPtr,
+  -- and it's doubtful I'll be able to make coroutines a special case of them.
+  -- Also, that argument is the 'a' in contRun below, and I'm not sure how
+  -- I'd be able to get at that argument from here, or if I even could.
+  -- The way I understand it, all my definitions must be parametrized over it,
+  -- and it can't escape that.
+
+  -- However, the convention of using the dummy name (+yield) works well
+  -- enough.  If I get the type signature right, then I could close the loop
+  -- in the AST later (instead of turning this into the dereferences and such).
 
   params = CoroutineParams
     { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
-    , getBreakLabel = error "Ivory.Language.Coroutine: no break label set, but breakOut called"
+    , getBreakLabel =
+      error "Ivory.Language.Coroutine: no break label set, but breakOut called"
     }
 
   initialState = CoroutineState
@@ -150,11 +160,13 @@ continuation name (ContBody fromYield) = Continuation { .. }
   -- resumeAt call will emit a 'break;' statement outside of the
   -- forever-loop that the state machine runs in, which is invalid C.
   initCode = makeLabel' =<< getBlock rawCode (resumeAt 0)
-  (((initLabel, _), (localVars, resumes)), finalState) = MonadLib.runM initCode params initialState
+  (((initLabel, _), (localVars, resumes)), finalState) =
+     MonadLib.runM initCode params initialState
   initBB = BasicBlock [] $ BranchTo False initLabel
 
   strName = name ++ "_continuation"
-  strDef = AST.Struct strName $ AST.Typed stateType stateName : D.toList localVars
+  strDef = AST.Struct strName $ AST.Typed stateType stateName :
+           D.toList localVars
   strTy = AST.TyStruct strName
   cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
 
@@ -448,19 +460,24 @@ addYield ty var rest =
                MonadLib.lift $ MonadLib.put
                  (mempty, Map.singleton after resume)
                resumeAt after
-             (AST.TyProc _ _) -> do
+             (AST.TyProc r args) -> do
                -- The argument to TyProc appears to just be void type (which is
                -- not useful to us), however, the above pattern match works.
+               {-
                let AST.VarName varStr = var
                MonadLib.lift $ MonadLib.put
                  (D.singleton $ AST.Typed ty varStr, mempty)
 
+               -}
                -- Responsible for n_r0(?):
                cont <- contRef var
+               {-
                -- Responsible for ????:
                var `rewriteTo` return cont
 
+               -}
                after <- makeLabel' =<< getBlock [] rest
+               {-
 
                -- Responsible for copying value (do we even need this?):
                let resume arg =
@@ -469,6 +486,16 @@ addYield ty var rest =
                              show arg) $ AST.RefCopy ty cont arg]
                
                MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
+               -}
+
+               stmt $ AST.Local ty var $ AST.InitExpr ty $ cont
+               stmt $ AST.Call r Nothing (AST.NameVar var) []
+               -- CMH, TODO: Fix Nothing (need to store result)
+               -- Big TODO: The arguments are incorrect on this. I will need
+               -- to update the type signature of the function that is passed
+               -- for 'yield'.
+               -- I suspect this function cannot accomplish what I need, but
+               -- the calling context does contains the arguments.
                
                resumeAt after
 
