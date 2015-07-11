@@ -10,7 +10,7 @@ import Ivory.Compile.C.CmdlineFrontend
 emit :: Def ('[Sint32] :-> ())
 emit = proc "emit" $ \ _ -> body $ retVoid
 
-sequenced :: Coroutine (Stored Sint32)
+sequenced :: Coroutine (ConstRef s (Stored Sint32))
 sequenced = coroutine "sequenced" $ CoroutineBody $ \ yield -> do
   forever $ do
     call_ emit 1

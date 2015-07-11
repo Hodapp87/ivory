@@ -8,7 +8,6 @@
 
 module Ivory.Language.Coroutine (
   Coroutine(..), CoroutineBody(..), coroutine,
-  Continuation(..), ContBody(..), continuation
 ) where
 
 -- CMH, debug
@@ -42,7 +41,7 @@ import qualified MonadLib
 
 data Coroutine a = Coroutine
   { coroutineName :: String
-  , coroutineRun :: forall eff s s'. GetAlloc eff ~ Scope s' => IBool -> ConstRef s a -> Ivory eff ()
+  , coroutineRun :: forall eff s . GetAlloc eff ~ Scope s => IBool -> a -> Ivory eff ()
   , coroutineDef :: ModuleDef
   }
 
@@ -50,82 +49,16 @@ data Coroutine a = Coroutine
 -- that 'ConstRef s a' part when it's in an existential?
 
 newtype CoroutineBody a =
-  CoroutineBody (forall s1 s2.
-                 (forall b.
-                  Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)) ->
-                         Ivory (ProcEffects s2 ()) ())
-
-coroutine :: forall a. IvoryArea a => String -> CoroutineBody a -> Coroutine a
-coroutine name (CoroutineBody fromYield) = Coroutine { .. }
-  where
-  ((), CodeBlock { blockStmts = rawCode }) =
-    runIvory $ fromYield $ call (proc yieldName $ body $ return ())
-
-  params = CoroutineParams
-    { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
-    , getBreakLabel = error "Ivory.Language.Coroutine: no break label set, but breakOut called"
-    }
-
-  initialState = CoroutineState
-    { rewrites = Map.empty
-    , labels = []
-    , derefs = 0
-    }
-
-  -- Even the initial block needs a label, in case there's a yield or
-  -- return before any control flow statements. Otherwise, the resulting
-  -- resumeAt call will emit a 'break;' statement outside of the
-  -- forever-loop that the state machine runs in, which is invalid C.
-  initCode = makeLabel' =<< getBlock rawCode (resumeAt 0)
-  (((initLabel, _), (localVars, resumes)), finalState) = MonadLib.runM initCode params initialState
-  initBB = BasicBlock [] $ BranchTo False initLabel
-
-  strName = name ++ "_continuation"
-  strDef = AST.Struct strName $ AST.Typed stateType stateName : D.toList localVars
-  strTy = AST.TyStruct strName
-  cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
-
-  coroutineName = name
-
-  litLabel = AST.ExpLit . AST.LitInteger . fromIntegral
-
-  genBB (BasicBlock pre term) = pre ++ case term of
-    BranchTo suspend label ->
-       (AST.Store stateType (getCont params stateName) $ litLabel label) :
-        if suspend then [AST.Break] else []
-    CondBranchTo cond tb fb -> [AST.IfTE cond (genBB tb) (genBB fb)]
-
-  coroutineRun :: IBool -> ConstRef s a -> Ivory eff ()
-  coroutineRun doInit arg = do
-    ifte_ doInit (emits mempty { blockStmts = genBB initBB }) (return ())
-    emit $ AST.Forever $ (AST.Deref stateType (AST.VarName stateName) $ getCont params stateName) : do
-      (label, block) <- keepUsedBlocks initLabel $ zip [0..] $ map joinTerminators $ (BasicBlock [] $ BranchTo True 0) : reverse (labels finalState)
-      let cond = AST.ExpOp (AST.ExpEq stateType) [AST.ExpVar (AST.VarName stateName), litLabel label]
-      let b' = Map.findWithDefault (const []) label resumes (unwrapExpr arg) ++ genBB block
-      return $ AST.IfTE cond b' []
-
-  coroutineDef = do
-    visibility <- MonadLib.ask
-    MonadLib.put $ mempty
-      { AST.modStructs = visAcc visibility strDef
-      , AST.modAreas = visAcc visibility cont
-      }
-
-data Continuation a = Continuation
-  { contName :: String
-  , contRun :: forall eff s s' .
-               GetAlloc eff ~ Scope s' => IBool -> a -> Ivory eff ()
-  , contDef :: ModuleDef
-  }
-
-newtype ContBody a =
-  ContBody (forall s.
+  CoroutineBody (forall s.
                  (forall b.
                   Ivory ('Effects (Returns ()) b (Scope s)) a) ->
                          Ivory (ProcEffects s ()) ())
 
-continuation :: forall a. IvoryVar a => String -> ContBody a -> Continuation a
-continuation name (ContBody fromYield) = Continuation { .. }
+-- It looks to me like any CoroutineBody is also a ContBody, though I'm not
+-- certain.
+
+coroutine :: forall a. IvoryVar a => String -> CoroutineBody a -> Coroutine a
+coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   where
   ((), CodeBlock { blockStmts = rawCode }) =
     runIvory $ fromYield $ call (proc yieldName $ body $ return ())
@@ -186,8 +119,8 @@ continuation name (ContBody fromYield) = Continuation { .. }
     BranchTo suspend label -> (AST.Store stateType (getCont params stateName) $ litLabel label) : if suspend then [AST.Break] else []
     CondBranchTo cond tb fb -> [AST.IfTE cond (genBB tb) (genBB fb)]
 
-  contRun :: IBool -> a -> Ivory eff ()
-  contRun doInit arg = do
+  coroutineRun :: IBool -> a -> Ivory eff ()
+  coroutineRun doInit arg = do
     ifte_ doInit (emits mempty { blockStmts = genBB initBB }) (return ())
     emit $ AST.Forever $ (AST.Deref stateType (AST.VarName stateName) $ getCont params stateName) : do
       (label, block) <- keepUsedBlocks initLabel $ zip [0..] $ map joinTerminators $ (BasicBlock [] $ BranchTo True 0) : reverse (labels finalState)
@@ -195,7 +128,7 @@ continuation name (ContBody fromYield) = Continuation { .. }
       let b' = Map.findWithDefault (const []) label resumes (unwrapExpr arg) ++ genBB block
       return $ AST.IfTE cond b' []
 
-  contDef = do
+  coroutineDef = do
     visibility <- MonadLib.ask
     MonadLib.put $ mempty
       { AST.modStructs = visAcc visibility strDef
@@ -468,6 +401,7 @@ addYield ty var rest =
                MonadLib.lift $ MonadLib.put
                  (mempty, Map.singleton after resume)
                resumeAt after
+             (AST.TyConstRef derefTy) -> addYield (AST.TyRef derefTy) var rest
              (AST.TyProc r args) -> do
                -- The argument to TyProc appears to just be void type (which is
                -- not useful to us), however, the above pattern match works.
