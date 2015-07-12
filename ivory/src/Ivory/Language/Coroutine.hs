@@ -1,3 +1,10 @@
+{- |
+Module: Coroutine.hs
+Description: Resumable coroutines implementation
+Copyright: (c) 2014 Galois, Inc.
+
+-}
+
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RankNTypes #-}
@@ -7,8 +14,12 @@
 {-# LANGUAGE TypeOperators #-}
 
 module Ivory.Language.Coroutine (
+  -- * Usage Notes
+  -- $ usageNotes
+  -- * Implementation Notes
+  -- $ implNotes
   Coroutine(..), CoroutineBody(..), coroutine,
-) where
+  ) where
 
 -- CMH, debug
 import Debug.Trace
@@ -39,9 +50,90 @@ import qualified MonadLib
 -- TODO: full liveness analysis to maximize re-use
 -- TODO: only extract a variable to the continuation if it is live across a suspend
 
+{- $usageNotes
+
+The coroutine itself is presented as a function which has one argument,
+@yield@.  @yield@ suspends the coroutine's execution at the point of usage.
+
+-}
+
+{- $implNotes
+
+Coroutines are implemented as a single large C function, mainly as a series of
+branches inside of a single infinite loop.
+
+It was mentioned that @yield@ /suspends/ a coroutine for later resumption.
+The state of the computation to be resumed later - that is, its
+/continuation/ - is stored in a C struct, not visible to the outer Ivory code,
+but denoted internally with a suffix of @_continuation@.  This C struct
+contains a state variable and every local variable that is created.
+
+At each @yield@, after collecting the current computation state into the
+continuation, the C function breaks out of its loop and returns.
+
+The @yield@ action is implemented as a sort of pseudo-function call which is
+given a purposely-invalid name (see 'yieldName'). This Ivory call does not
+become an actual function call in generated code, but rather, the code is
+suspended right there.  (See the 'extractLocals' and 'addYield' functions.)
+
+The pseudo-function call returns a type which relates to the type of the
+coroutine itself.  Of course, no actual function call exists, but the action
+itself still returns something - hence, Ivory code is able to refer to the
+return value of a @yield@.
+
+Dereferences to it via 'deref' are turned to references to the continuation
+struct.  (CMH: Explain better here, as this depends on whether or not my change
+is present which also turns permits a 'ProcPtr' inside and handles specially
+a call using 'indirect' on it.)
+
+As this @yield@ action is an Ivory effect, it can be passed at the Haskell
+level, but it cannot be passed as a C value. (If one could hypothetically run
+'procPtr' on it, then one could pass it around as a value, but any attempt to
+call it outside of the same coroutine would result in either an invalid
+function call, or a suspend & return of a different coroutine.)
+
+-}
+
+{- Dabbling notes
+
+- At the C level, 'yield' causes the function to return.
+- Though it has some first-class status in Haskell, it cannot be passed around
+as a value.
+- The results of a 'yield', however, can be passed.
+- One can use 'yield' to pass a ProcPtr using my changes.
+- Neither calling that ProcPtr directly, nor passing it as an argument to
+another call, can ever have the same effect as 'yield'. This fact, combined
+with the behavior of 'yield' suggests to me that I do *not* have continuations
+here in the form I was hoping!  What I possibly have is coroutines that can
+compose.
+
+My representation of the function's continuation is 'coroutineRun'. Note
+that this continuation is valid only for a single 'yield' action; as soon
+as another 'yield' action occurs, the continuation is updated.
+
+In some sense, the 'yield' action sets up the continuation for the function
+in which it is called.  That continuation is accessed via 'coroutineRun'.
+
+What, then, does a ProcPtr passed at the point of continuation correspond
+to? The ProcPtr itself still appears to be like the 'continuation object',
+in which calling it is its only meaningful operation.
+
+If I must pass this continuation object to the point of continuation, there
+is one way to do this: with an existing 'coroutineRun'.  This is also one
+way that I see of getting a compatible ProcPtr in the first place.  Is this
+then the form of composition that I'm looking for?
+
+Also, if the 'yield' is a suspend, what does calling out elsewhere
+correspond to?  Why do I need both?  What additional expressiveness does
+having them separate get me?  (I suppose the ability to pass a ProcPtr is
+one).
+
+-}
+
 data Coroutine a = Coroutine
   { coroutineName :: String
-  , coroutineRun :: forall eff s . GetAlloc eff ~ Scope s => IBool -> a -> Ivory eff ()
+  , coroutineRun :: forall eff s .
+                    GetAlloc eff ~ Scope s => IBool -> a -> Ivory eff ()
   , coroutineDef :: ModuleDef
   }
 
@@ -390,6 +482,8 @@ addLocal ty var = do
 addYield :: AST.Type -> AST.Var -> CoroutineMonad Terminator -> CoroutineMonad Terminator
 addYield ty var rest =
   trace ("addYield ty=" ++ show ty ++ ", var=" ++ show var) $ do
+    -- CMH: Basically the only code changes that matter are here, and in the
+    -- definitions of Coroutine that loosen the requirement of 'ConstRef'.
   case ty of (AST.TyRef derefTy) -> do
                let AST.VarName varStr = var
                MonadLib.lift $ MonadLib.put
@@ -552,3 +646,4 @@ updateTypedExpr :: AST.Typed AST.Expr -> UpdateExpr (AST.Typed AST.Expr)
 updateTypedExpr (AST.Typed ty ex) =
   trace ("updateTypedExpr AST.Typed ty=" ++ show ty ++ ", ex=" ++ show ex) $
   AST.Typed ty <$> updateExpr_ ex
+
