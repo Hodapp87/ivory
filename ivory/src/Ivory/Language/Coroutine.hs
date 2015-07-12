@@ -55,6 +55,9 @@ import qualified MonadLib
 The coroutine itself is presented as a function which has one argument,
 @yield@.  @yield@ suspends the coroutine's execution at the point of usage.
 
+'coroutineRun' (given an argument of 'false') then resumes the suspended
+coroutine at that point, passing in a value in the process.
+
 -}
 
 {- $implNotes
@@ -107,10 +110,6 @@ with the behavior of 'yield' suggests to me that I do *not* have continuations
 here in the form I was hoping!  What I possibly have is coroutines that can
 compose.
 
-My representation of the function's continuation is 'coroutineRun'. Note
-that this continuation is valid only for a single 'yield' action; as soon
-as another 'yield' action occurs, the continuation is updated.
-
 In some sense, the 'yield' action sets up the continuation for the function
 in which it is called.  That continuation is accessed via 'coroutineRun'.
 
@@ -131,23 +130,22 @@ one).
 -}
 
 data Coroutine a = Coroutine
-  { coroutineName :: String
+  { -- ^ Name of the coroutine (must be a valid C identifier)
+    coroutineName :: String
+    -- ^ Ivory effect for initializing a coroutine (if first argument is
+    -- 'true'), or resuming it (if first argument is 'false').  The second
+    -- argument is passed to the coroutine when resuming, and ignored when
+    -- initializing.
   , coroutineRun :: forall eff s .
                     GetAlloc eff ~ Scope s => IBool -> a -> Ivory eff ()
   , coroutineDef :: ModuleDef
   }
-
--- If I want to write Coroutine in terms of Continuation, then how do I get
--- that 'ConstRef s a' part when it's in an existential?
 
 newtype CoroutineBody a =
   CoroutineBody (forall s.
                  (forall b.
                   Ivory ('Effects (Returns ()) b (Scope s)) a) ->
                          Ivory (ProcEffects s ()) ())
-
--- It looks to me like any CoroutineBody is also a ContBody, though I'm not
--- certain.
 
 coroutine :: forall a. IvoryVar a => String -> CoroutineBody a -> Coroutine a
 coroutine name (CoroutineBody fromYield) = Coroutine { .. }
