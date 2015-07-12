@@ -537,11 +537,58 @@ over to A or B depending on who called it.  For this to work, coroutine C must
 have some notion of who invoked it - and the most general way that I see of
 this working is for coroutine C to receive some sort of continuation.  Like
 mentioned before, a 'return' ProcPtr can be seen as one representation of the
-continuation.
+continuation.  (This example still has some gotchas: You cannot have two
+instances of coroutine C running simultaneously.)
+
+Mainly, one can now resume a function, *and* supply a continuation to which to
+pass a value eventually. Further, this can be done inside of a coroutine
+safely, I think.
 
 I suppose I could make an Ivory effect parametrized over two things, make the
 first thing the 'return' continuation, and use currying to get this to an
 effect taking one argument - which then could be the coroutine body.
+
+Or, I could add this argument to CoroutineBody. This would require two changes:
+ - 'coroutineRun' would require an additional argument for which there is no
+sensible default - the continuation ProcPtr.
+ - All coroutine definitions would require an additional argument alongside
+'yield' (though I may be able to just make two smart constructors and leave old
+uses of it compatible).
+
+But if it's passed as an additional argument, then what need have I to make
+'yield' comprehend it specially?  The coroutine still can store a ProcPtr for
+later usage inside its own continuation.  (But, is this any different than just
+making 'yield' return 2 parameters, instead of just 1?)
+
+But going to the prior example with coroutines A, B, and C, how could coroutine
+C ever pass a value back to coroutine A/B?  It can only pass a function
+pointer.  It would have to generate a function which returns something and then
+rely on A/B to call it and acquire this result, which hardly seems ideal.
+
+I am also stuck at the ordering of yielding and calling when one wants to call
+one coroutine from another.
+Coroutine A calls coroutine C, giving its own continuation.  Coroutine C either
+finishes immediately (without suspending) and calls that continuation itself,
+at which point coroutine A now has two simultaneous instances running.  Its
+state has never changed, which means that it just calls coroutine C again - and
+presumably, is then caught in an infinite loop.  Or, coroutine C must suspend
+itself (perhaps it stores the continuation to A), and this takes the form of
+returning.  Coroutine A is then back in control and is free to yield or do
+whatever it must do; presumably, it must yield and change its state so that
+once coroutine C is resumed, it can resume coroutine A.
+
+So, it appears that a callee coroutine must yield, and permit the caller to
+yield, and then something else must resume the caller. Or, the caller must have
+a way to yield at the same instant as making a call, and then the callee can
+resume the caller whether it does it immediately, or whether it first suspends
+and is resumed.  This still has some stack implementations, but it may not be
+too problematic.
+
+This would need some sort of special 'yieldTo' action which takes another
+coroutine, and passes the calling coroutine's continuation.
+
+This has also let alone the question of what one does to call another coroutine
+but specify that that coroutine should turn control to a 3rd coroutine.
 
 -}
 
