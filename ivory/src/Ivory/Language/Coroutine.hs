@@ -202,7 +202,7 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   strTy = AST.TyStruct strName
   cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
 
-  contName = name
+  coroutineName = name
 
   litLabel = AST.ExpLit . AST.LitInteger . fromIntegral
 
