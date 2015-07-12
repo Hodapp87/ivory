@@ -28,6 +28,7 @@ module Ivory.Language.Coroutine (
   -- $implNotes
   
   Coroutine(..), CoroutineBody(..), coroutine,
+  Coroutine_(..), ContDef(..), coroutineDef_
   ) where
 
 import Control.Applicative
@@ -100,42 +101,6 @@ level, but it cannot be passed as a C value. (If one could hypothetically run
 'procPtr' on it, then one could pass it around as a value, but any attempt to
 call it outside of the same coroutine would result in either an invalid
 function call, or a suspend & return of a different coroutine.)
-
--}
-
-{- Dabbling notes
-
-- At the C level, 'yield' causes the function to return.
-- Though it has some first-class status in Haskell, it cannot be passed around
-as a value.
-- The results of a 'yield', however, can be passed.
-- One can use 'yield' to pass a ProcPtr using my changes.
-- Neither calling that ProcPtr directly, nor passing it as an argument to
-another call, can ever have the same effect as 'yield'.  These are always
-normal function calls, and however many times they pass values forward in
-continuation-passing style, all of them must at some point return.
-- This fact, combined with the behavior of 'yield' suggests to me that I do
-*not* have continuations here in the form I was hoping!  What I possibly have
-is coroutines that can compose.
-
-In some sense, the 'yield' action sets up the continuation for the function
-in which it is called.  That continuation is accessed via 'coroutineRun'.
-
-What, then, does a ProcPtr passed at the point of continuation correspond
-to? The ProcPtr itself still appears to be like the 'continuation object',
-in which calling it is its only meaningful operation.
-
-If I must pass this continuation object to the point of continuation, there
-is one way to do this: with an existing 'coroutineRun'.  This is also one
-way that I see of getting a compatible ProcPtr in the first place.
-
-Suppose I have coroutines A, B, and C, and I want coroutines A and B to both be
-able to invoke coroutine C, but properly have coroutine C turn control back
-over to A or B depending on who called it.  For this to work, coroutine C must
-have some notion of who invoked it - and the most general way that I see of
-this working is for coroutine C to receive some sort of continuation.  Like
-mentioned before, a 'return' ProcPtr can be seen as one representation of the
-continuation.
 
 -}
 
@@ -536,3 +501,109 @@ updateInit (AST.InitArray elems) =
 -- recursively in all its sub-expressions) with the updates in 'UpdateExpr'.
 updateTypedExpr :: AST.Typed AST.Expr -> UpdateExpr (AST.Typed AST.Expr)
 updateTypedExpr (AST.Typed ty ex) = AST.Typed ty <$> updateExpr ex
+
+
+-- * Experimental stuff with composition
+
+{- Dabbling notes
+
+- At the C level, 'yield' causes the function to return.
+- Though it has some first-class status in Haskell, it cannot be passed around
+as a value.
+- The results of a 'yield', however, can be passed.
+- One can use 'yield' to pass a ProcPtr using my changes.
+- Neither calling that ProcPtr directly, nor passing it as an argument to
+another call, can ever have the same effect as 'yield'.  These are always
+normal function calls, and however many times they pass values forward in
+continuation-passing style, all of them must at some point return.
+- This fact, combined with the behavior of 'yield' suggests to me that I do
+*not* have continuations here in the form I was hoping!  What I possibly have
+is coroutines that can compose.
+
+In some sense, the 'yield' action sets up the continuation for the function
+in which it is called.  That continuation is accessed via 'coroutineRun'.
+
+What, then, does a ProcPtr passed at the point of continuation correspond
+to? The ProcPtr itself still appears to be like the 'continuation object',
+in which calling it is its only meaningful operation.
+
+If I must pass this continuation object to the point of continuation, there
+is one way to do this: with an existing 'coroutineRun'.  This is also one
+way that I see of getting a compatible ProcPtr in the first place.
+
+Suppose I have coroutines A, B, and C, and I want coroutines A and B to both be
+able to invoke coroutine C, but properly have coroutine C turn control back
+over to A or B depending on who called it.  For this to work, coroutine C must
+have some notion of who invoked it - and the most general way that I see of
+this working is for coroutine C to receive some sort of continuation.  Like
+mentioned before, a 'return' ProcPtr can be seen as one representation of the
+continuation.
+
+I suppose I could make an Ivory effect parametrized over two things, make the
+first thing the 'return' continuation, and use currying to get this to an
+effect taking one argument - which then could be the coroutine body.
+
+-}
+
+-- | A continuation, in the form of a function which produces a 'Coroutine',
+-- given its own continuation procedure. (The parameter to the coroutine itself
+-- is a pointer to the 'return' continuation.)
+type Coroutine_ p = Def ('[ProcPtr p] ':-> ()) -> Coroutine (ProcPtr p)
+
+-- | Experimental continuation-passing coroutines (or something close to that).
+-- I explain this, or attempt to, in my work notes around 2015-06-10.
+data ContDef p = ContDef {
+  -- | Coroutine entry (initialization) procedure.
+  contStart :: Def ('[] ':-> ()),
+  
+  -- | Procedure to continue a coroutine. The argument is a continuation which
+  -- this coroutine calls to yield control.
+  -- This is something of an analog to 'callCC' on Ivory procedures.
+  -- (is it?)
+  contCC :: Def ('[ProcPtr p] ':-> ()),
+  
+  -- | Coroutine definition (do I need this?)
+  coDef :: Coroutine (ProcPtr p),
+
+  -- | 'incl' and 'coroutineDef' for the functionality in this
+  contModuleDefs :: ModuleDef
+}
+
+-- | 'ContDef' smart constructor from a 'Coroutine_'
+coroutineDef_ :: forall p ret .
+            (ProcType p, IvoryVar (ProcPtr p)) => Coroutine_ p -> ContDef p
+coroutineDef_ coFn = ContDef { contStart = start
+                       , contCC = contCC_
+                       , coDef = coroutine_
+                       , contModuleDefs = mods
+                       }
+  where coroutine_ = coFn contCC_
+        name = coroutineName coroutine_
+
+        {-
+        -- Function which is just a placeholder:
+        dummy :: Def (t ':-> ())
+        dummy = proc (name ++ "_dummy") _
+        -- The problem is that the next argument in 'dummy' (currently just an
+        -- underscore) must take a number of arguments that matches the pattern
+        -- of arguments in 't', and I have no idea how to do this.
+        -- For now I'm using 'importProc' in 'start' and referring to a made-up
+        -- function.
+        -}
+
+        start = proc (name ++ "_start") $ body $ do
+          -- The coroutine ignores this parameter, but we must pass something:
+          call_ impl true $ procPtr $ importProc "dummy" "dummy.h"
+          
+        contCC_ = proc (name ++ "_cont") $ \cc -> body $ do
+          call_ impl true cc
+
+        impl :: Def ('[IBool, ProcPtr p] ':-> ())
+        impl = proc (name ++ "_impl") $ \init exit -> body $ do
+                     --exit' <- local $ ival exit
+                     coroutineRun coroutine_ init exit
+
+        mods = do coroutineDef coroutine_
+                  incl start
+                  incl impl
+                  --incl dummy
