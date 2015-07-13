@@ -581,11 +581,12 @@ So, it appears that a callee coroutine must yield, and permit the caller to
 yield, and then something else must resume the caller. Or, the caller must have
 a way to yield at the same instant as making a call, and then the callee can
 resume the caller whether it does it immediately, or whether it first suspends
-and is resumed.  This still has some stack implementations, but it may not be
-too problematic.
+and is resumed.  This still has some stack implications, but it may not be too
+problematic.
 
-This would need some sort of special 'yieldTo' action which takes another
-coroutine, and passes the calling coroutine's continuation.
+This would need some sort of special 'yieldTo' action which suspends the
+coroutine, but passes the calling coroutine's continuation to another
+coroutine.
 
 This has also let alone the question of what one does to call another coroutine
 but specify that that coroutine should turn control to a 3rd coroutine.
