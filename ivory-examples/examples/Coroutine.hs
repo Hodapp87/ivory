@@ -34,3 +34,36 @@ cmodule = package "sequenced" $ do
 
 main :: IO ()
 main = compile [cmodule] []
+
+-- * Other tests (to be cleaned up later):
+
+testRun :: IO ()
+testRun = do
+  let ivoryOpts = initialOpts { scErrors = False
+                              , srcLocs = True
+                              , outDir = Nothing
+                              }
+  runCompiler [test] [] ivoryOpts
+
+test :: Module
+test = package "continuation" $ do
+  contModuleDefs testContDef
+
+testCont :: Coroutine_ ('[Uint16] :-> Uint8)
+testCont ourCont = coroutine "testCont" $ CoroutineBody $ \escape -> do
+  -- We must first get the exit continuation:
+  exitCont <- escape
+
+  comment "Following first yield"
+  val <- indirect exitCont 0
+  ifte_ (val >? 0)
+    (comment "> 0")
+    (comment "<= 0")
+  comment "Following first indirect"
+  exitCont2 <- escape
+  comment "Following second yield"
+  val2 <- indirect exitCont2 1
+
+  retVoid
+
+testContDef = coroutineDef_ testCont
