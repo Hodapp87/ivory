@@ -611,7 +611,7 @@ data ContDef p = ContDef {
   contCC :: Def ('[ProcPtr p] ':-> ()),
   
   -- | Coroutine definition (do I need this?)
-  coDef :: Coroutine (ProcPtr p),
+  contDef :: Coroutine (ProcPtr p),
 
   -- | 'incl' and 'coroutineDef' for the functionality in this
   contModuleDefs :: ModuleDef
@@ -622,7 +622,7 @@ coroutineDef_ :: forall p ret .
             (ProcType p, IvoryVar (ProcPtr p)) => Coroutine_ p -> ContDef p
 coroutineDef_ coFn = ContDef { contStart = start
                        , contCC = contCC_
-                       , coDef = coroutine_
+                       , contDef = coroutine_
                        , contModuleDefs = mods
                        }
   where coroutine_ = coFn contCC_
