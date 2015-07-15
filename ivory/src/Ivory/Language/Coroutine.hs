@@ -159,6 +159,7 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   initCode = makeLabel' =<< getBlock rawCode (resumeAt 0)
   (((initLabel, _), (localVars, resumes)), finalState) =
      MonadLib.runM initCode params initialState
+  -- runM here is: MonadLib.WriterT (D.DList AST.Stmt) (MonadLib.ReaderT CoroutineParams (MonadLib.WriterT CoroutineVars (MonadLib.StateT CoroutineState MonadLib.Id))) Goto -> CoroutineParams -> CoroutineState -> (((Goto, t0), (D.DList (AST.Typed String), Map.Map Goto (AST.Expr -> [AST.Stmt]))), CoroutineState)
   initBB = BasicBlock [] $ BranchTo False initLabel
 
   strName = name ++ "_continuation"
@@ -180,8 +181,11 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
     ifte_ doInit (emits mempty { blockStmts = genBB initBB }) (return ())
     emit $ AST.Forever $ (AST.Deref stateType (AST.VarName stateName) $ getCont params stateName) : do
       (label, block) <- keepUsedBlocks initLabel $ zip [0..] $ map joinTerminators $ (BasicBlock [] $ BranchTo True 0) : reverse (labels finalState)
-      let cond = AST.ExpOp (AST.ExpEq stateType) [AST.ExpVar (AST.VarName stateName), litLabel label]
-      let b' = Map.findWithDefault (const []) label resumes (unwrapExpr arg) ++ genBB block
+      let cond = AST.ExpOp (AST.ExpEq stateType)
+                 [AST.ExpVar (AST.VarName stateName), litLabel label]
+          fn :: AST.Expr -> [AST.Stmt]
+          fn = Map.findWithDefault (const []) label resumes
+          b' = fn (unwrapExpr arg) ++ genBB block
       return $ AST.IfTE cond b' []
 
   coroutineDef = do
