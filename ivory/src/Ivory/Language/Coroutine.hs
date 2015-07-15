@@ -11,6 +11,17 @@ This is an implementation of coroutines in Ivory.  These coroutines:
   * can have only one instance executing at once, given a particular coroutine
 name and Ivory module.
 
+This includes some experimental changes of mine too which allow a Coroutine to
+be parametrized over a ProcPtr, rather than just always implicitly a ConstRef.
+This however breaks some compatibility by requiring that one explicitly make
+earlier examples over a (ConstRef s (Stored t)) rather than just (Stored t).
+
+The above changes aren't entirely necessary and I may remove them.  They did
+not end up achieving what I wanted.
+
+Next TODO item for me is to add the ability to pass a continuation
+ProcPtr ([a] :-> r) to coroutineRun (in addition to an argument of type 'a').
+
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
