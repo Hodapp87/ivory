@@ -11,17 +11,6 @@ This is an implementation of coroutines in Ivory.  These coroutines:
   * can have only one instance executing at once, given a particular coroutine
 name and Ivory module.
 
-This includes some experimental changes of mine too which allow a Coroutine to
-be parametrized over a ProcPtr, rather than just always implicitly a ConstRef.
-This however breaks some compatibility by requiring that one explicitly make
-earlier examples over a (ConstRef s (Stored t)) rather than just (Stored t).
-
-The above changes aren't entirely necessary and I may remove them.  They did
-not end up achieving what I wanted.
-
-Next TODO item for me is to add the ability to pass a continuation
-ProcPtr ([a] :-> r) to coroutineRun (in addition to an argument of type 'a').
-
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -173,7 +162,16 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   initBB = BasicBlock [] $ BranchTo False initLabel
 
   strName = name ++ "_continuation"
-  strDef = AST.Struct strName $ AST.Typed stateType stateName :
+  strDef = AST.Struct strName $
+           -- State variable:
+           AST.Typed stateType stateName :
+           -- Return continuation:
+           AST.Typed (AST.TyProc undefined []) returnContName :
+           -- CMH: How do I get the AST.Type constructor for 'a'?
+           -- unwrapExpr gives me an AST.Expr, but that's untyped (ish).
+           -- Likewise unwrapRef for a reference.
+
+           -- All the local variables:
            D.toList localVars
   strTy = AST.TyStruct strName
   cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
@@ -210,6 +208,10 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
 -- it can't collide with a real procedure.
 yieldName :: String
 yieldName = "+yield"
+
+-- | Name of the return continuation function
+returnContName :: String
+returnContName = "ret_cont"
 
 -- | Name of the variable used for the coroutine's current state.
 stateName :: String
