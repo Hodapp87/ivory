@@ -39,7 +39,6 @@ module Ivory.Language.Coroutine (
   -- $implNotes
   
   Coroutine(..), CoroutineBody(..), coroutine,
-  Coroutine_(..), ContDef(..), coroutineDef_
   ) where
 
 import Control.Applicative
@@ -123,8 +122,8 @@ data Coroutine a = Coroutine
     -- 'true'), or resuming it (if first argument is 'false').  The second
     -- argument is passed to the coroutine when resuming, and ignored when
     -- initializing.
-  , coroutineRun :: forall eff s .
-                    GetAlloc eff ~ Scope s => IBool -> a -> Ivory eff ()
+  , coroutineRun :: forall eff s s'. GetAlloc eff ~ Scope s' =>
+                    IBool -> ConstRef s a -> Ivory eff ()
     -- | The components a 'Module' will need for this coroutine
   , coroutineDef :: ModuleDef
   }
@@ -134,13 +133,13 @@ data Coroutine a = Coroutine
 -- coroutine, and sets the point at which 'coroutineRun' resumes it, passing a
 -- value.
 newtype CoroutineBody a =
-  CoroutineBody (forall s.
-                 (forall b.
-                  Ivory ('Effects (Returns ()) b (Scope s)) a) ->
-                         Ivory (ProcEffects s ()) ())
+  CoroutineBody (forall s1 s2 .
+                 (forall b .
+                  Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)) ->
+                         Ivory (ProcEffects s2 ()) ())
 
 -- | Smart constructor for a 'Coroutine'
-coroutine :: forall a. IvoryVar a =>
+coroutine :: forall a. IvoryArea a =>
              String -- ^ Coroutine name (must be a valid C identifier)
              -> CoroutineBody a -- ^ Coroutine definition
              -> Coroutine a
@@ -187,7 +186,7 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
     BranchTo suspend label -> (AST.Store stateType (getCont params stateName) $ litLabel label) : if suspend then [AST.Break] else []
     CondBranchTo cond tb fb -> [AST.IfTE cond (genBB tb) (genBB fb)]
 
-  coroutineRun :: IBool -> a -> Ivory eff ()
+  coroutineRun :: IBool -> ConstRef s a -> Ivory eff ()
   coroutineRun doInit arg = do
     ifte_ doInit (emits mempty { blockStmts = genBB initBB }) (return ())
     emit $ AST.Forever $ (AST.Deref stateType (AST.VarName stateName) $ getCont params stateName) : do
@@ -424,23 +423,15 @@ addLocal ty var = do
   return cont
 
 addYield :: AST.Type -> AST.Var -> CoroutineMonad Terminator -> CoroutineMonad Terminator
-addYield (AST.TyRef derefTy) var rest = do
-  let AST.VarName varStr = var
+addYield ty var rest = do
+  let AST.TyRef derefTy = ty
+      AST.VarName varStr = var
   MonadLib.lift $ MonadLib.put
     (D.singleton $ AST.Typed derefTy varStr, mempty)
   cont <- contRef var
   var `rewriteTo` return cont
   after <- makeLabel' =<< getBlock [] rest
   let resume arg = [AST.RefCopy derefTy cont arg]
-  MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
-  resumeAt after
-addYield (AST.TyConstRef t) var rest = addYield (AST.TyRef t) var rest
-addYield ty@(AST.TyProc _ args) var rest = do
-  after <- makeLabel' =<< getBlock [] rest
-  -- At the point of resume, we must copy the argument to a form that function
-  -- calls can use:
-  -- TODO: Must this be live across a resume too?
-  let resume arg = [AST.Local ty var $ AST.InitExpr ty $ arg]
   MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
   resumeAt after
 
@@ -608,6 +599,8 @@ but specify that that coroutine should turn control to a 3rd coroutine.
 
 -}
 
+{-
+
 -- | A continuation, in the form of a function which produces a 'Coroutine',
 -- given its own continuation procedure. (The parameter to the coroutine itself
 -- is a pointer to the 'return' continuation.)
@@ -670,3 +663,5 @@ coroutineDef_ coFn = ContDef { contStart = start
                   incl start
                   incl impl
                   --incl dummy
+
+-}
