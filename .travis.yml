@@ -1,12 +1,20 @@
+sudo: false
 language: haskell
-before_install:
-- CVC4=cvc4-2014-11-22-i386-linux-opt
-- wget www.galois.com/~leepike/$CVC4
-- sudo mv $CVC4 /usr/local/bin/cvc4
-- sudo chmod a+x /usr/local/bin/cvc4
-- cvc4 --version
+addons:
+  apt:
+    sources:
+      - hvr-ghc
+    packages:
+      - cabal-install-1.22
+      - alex-3.1.4
+      - happy-1.19.5
 install:
-- cabal install alex happy
+- mkdir -p bin
+- PATH="$PWD/bin:/opt/cabal/1.22/bin:/opt/alex/3.1.4/bin:/opt/happy/1.19.5/bin:$PATH"
+- CVC4=cvc4-2014-11-22-i386-linux-opt
+- wget http://www.galois.com/~leepike/$CVC4 -O bin/cvc4
+- chmod a+x bin/cvc4
+- cvc4 --version
 script:
 - make test
 ghc:
