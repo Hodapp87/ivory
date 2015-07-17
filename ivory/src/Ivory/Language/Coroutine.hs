@@ -6,10 +6,29 @@ Copyright: (c) 2014 Galois, Inc.
 This is an implementation of coroutines in Ivory.  These coroutines:
 
   * may be suspended and resumed,
-  * are parametrized over most Ivory types,
+  * are parametrized over any memory-area type ('Area'), /(CMH: Is this right?
+Must it also have IvoryVar?)/
   * cannot return values, but can receive values when they are resumed,
   * can have only one instance executing at once, given a particular coroutine
 name and Ivory module.
+
+CMH, current work-in-progress:
+
+  * I have decided that the best way to compose two coroutines is that the
+caller needs to set its own continuation function in the continuation of the
+callee.  This would be a sort of specialized 'yield' function which sets that
+value in the specified coroutine's continuation, goes through the motions of
+suspending (but without returning), and calls that same coroutine's
+continuation function.
+  * Upon that coroutine exiting (not just returning), it calls the return
+continuation function set in its own continuation.  Is this correct, or does
+it need a more explicit way of yielding 'back'?  If one yields back, this would
+have to take an argument of the same type as the coroutine, and it would call
+to the return continuation function.  This would require runtime checks: that
+function pointer could be null depending on how the coroutine was called.
+  * I have this *field* added to the continuation struct, and I think the type
+is correct.
+  * I do not have it being set or used.
 
 -}
 {-# LANGUAGE DataKinds #-}
@@ -85,15 +104,11 @@ given a purposely-invalid name (see 'yieldName'). This Ivory call does not
 become an actual function call in generated code, but rather, the code is
 suspended right there.  (See the 'extractLocals' and 'addYield' functions.)
 
-The pseudo-function call returns a type which relates to the type of the
-coroutine itself.  Of course, no actual function call exists, but the action
-itself still returns something - hence, Ivory code is able to refer to the
-return value of a @yield@.
-
-Dereferences to it via 'deref' are turned to references to the continuation
-struct.  (CMH: Explain better here, as this depends on whether or not my change
-is present which also turns permits a 'ProcPtr' inside and handles specially
-a call using 'indirect' on it.)
+The pseudo-function call returns a 'ConstRef' to the coroutine's type.  Of
+course, no actual function call exists, but the action itself still returns
+something - hence, Ivory code is able to refer to the return value of a
+@yield@.  Dereferences to it via 'deref' are turned to references to the
+continuation struct.
 
 As this @yield@ action is an Ivory effect, it can be passed at the Haskell
 level, but it cannot be passed as a C value. (If one could hypothetically run
@@ -138,9 +153,13 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
     runIvory $ fromYield $ call (proc yieldName $ body $ return ())
   -- The above 'call (proc yieldName ...)' is a pseudo-call, returning type
   -- 'a', that is later extracted in the AST and replaced.
+{- CMH: How would I make another pseudo-call to handle the yield-to function?
+Is yieldTo the right name?  What about yieldBack, or whatever?
+-}
 
   params = CoroutineParams
-           { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $ AST.areaSym cont
+           { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $
+                       AST.areaSym contArea
            , getBreakLabel =
              error "Ivory.Language.Coroutine: no break label set, but breakOut called"
            }
@@ -158,7 +177,6 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   initCode = makeLabel' =<< getBlock rawCode (resumeAt 0)
   (((initLabel, _), (localVars, resumes)), finalState) =
      MonadLib.runM initCode params initialState
-  -- runM here is: MonadLib.WriterT (D.DList AST.Stmt) (MonadLib.ReaderT CoroutineParams (MonadLib.WriterT CoroutineVars (MonadLib.StateT CoroutineState MonadLib.Id))) Goto -> CoroutineParams -> CoroutineState -> (((Goto, t0), (D.DList (AST.Typed String), Map.Map Goto (AST.Expr -> [AST.Stmt]))), CoroutineState)
   initBB = BasicBlock [] $ BranchTo False initLabel
 
   coroutineType :: AST.Type
@@ -168,7 +186,10 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   returnContType :: AST.Type
   returnContType = AST.TyProc AST.TyVoid [coroutineType]
 
+  -- | Name of the continuation struct type:
   strName = name ++ "_continuation"
+
+  -- | Definitions of the continuation struct type:
   strDef = AST.Struct strName $
            -- State variable:
            AST.Typed stateType stateName :
@@ -176,7 +197,9 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
            AST.Typed returnContType returnContName :
            D.toList localVars
   strTy = AST.TyStruct strName
-  cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
+
+  -- | Area for the continuation struct instance:
+  contArea = AST.Area (name ++ "_cont") False strTy AST.InitZero
 
   coroutineName = name
 
@@ -202,7 +225,7 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
     visibility <- MonadLib.ask
     MonadLib.put $ mempty
       { AST.modStructs = visAcc visibility strDef
-      , AST.modAreas = visAcc visibility cont
+      , AST.modAreas = visAcc visibility contArea
       }
 
 -- | This is used as the name of a pseudo-function call which marks the
@@ -426,7 +449,9 @@ addLocal ty var = do
     return $ AST.ExpVar var'
   return cont
 
-addYield :: AST.Type -> AST.Var -> CoroutineMonad Terminator -> CoroutineMonad Terminator
+-- | Generate the code to turn a @yield@ pseudo-call to a suspend and resume.
+addYield :: AST.Type -> AST.Var -> CoroutineMonad Terminator ->
+            CoroutineMonad Terminator
 addYield ty var rest = do
   let AST.TyRef derefTy = ty
       AST.VarName varStr = var
@@ -434,6 +459,33 @@ addYield ty var rest = do
     (D.singleton $ AST.Typed derefTy varStr, mempty)
   cont <- contRef var
   var `rewriteTo` return cont
+  after <- makeLabel' =<< getBlock [] rest
+  let resume arg = [AST.RefCopy derefTy cont arg]
+  MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
+  resumeAt after
+
+-- | Generate the code to turn a @yieldTo@ pseudo-call to yielding control to
+-- another coroutine, and the subsequent resume.
+addYieldTo :: AST.Type -> AST.Var -> CoroutineMonad Terminator ->
+            CoroutineMonad Terminator
+addYieldTo ty var rest = do
+  let AST.TyRef derefTy = ty
+      AST.VarName varStr = var
+  MonadLib.lift $ MonadLib.put
+    (D.singleton $ AST.Typed derefTy varStr, mempty)
+  -- Capture/rewrite the return of the yield:
+  -- (this should be the same with yield or yieldTo, right?)
+  cont <- contRef var
+  var `rewriteTo` return cont
+  -- CMH: Set the return continuation?
+  -- I need to get somehow into the continuation of what we're invoking,
+  -- not our own continuation.  This may enforce a dependency between modules,
+  -- as it must be able to see the variable.  (But, I suppose this is
+  -- no big deal.)
+  -- Inside of 'coroutine' is contArea which is this struct itself as an
+  -- AST.Area.  I could factor this out into a function parametrized over
+  -- the coroutine or coroutine name.
+  -- returnCont <- MonadLib.asks getCont <*> pure returnContName
   after <- makeLabel' =<< getBlock [] rest
   let resume arg = [AST.RefCopy derefTy cont arg]
   MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
@@ -600,72 +652,5 @@ coroutine.
 
 This has also let alone the question of what one does to call another coroutine
 but specify that that coroutine should turn control to a 3rd coroutine.
-
--}
-
-{-
-
--- | A continuation, in the form of a function which produces a 'Coroutine',
--- given its own continuation procedure. (The parameter to the coroutine itself
--- is a pointer to the 'return' continuation.)
-type Coroutine_ p = Def ('[ProcPtr p] ':-> ()) -> Coroutine (ProcPtr p)
-
--- | Experimental continuation-passing coroutines (or something close to that).
--- I explain this, or attempt to, in my work notes around 2015-06-10.
-data ContDef p = ContDef {
-  -- | Coroutine entry (initialization) procedure.
-  contStart :: Def ('[] ':-> ()),
-  
-  -- | Procedure to continue a coroutine. The argument is a continuation which
-  -- this coroutine calls to yield control.
-  -- This is something of an analog to 'callCC' on Ivory procedures.
-  -- (is it?)
-  contCC :: Def ('[ProcPtr p] ':-> ()),
-  
-  -- | Coroutine definition (do I need this?)
-  contDef :: Coroutine (ProcPtr p),
-
-  -- | 'incl' and 'coroutineDef' for the functionality in this
-  contModuleDefs :: ModuleDef
-}
-
--- | 'ContDef' smart constructor from a 'Coroutine_'
-coroutineDef_ :: forall p ret .
-            (ProcType p, IvoryVar (ProcPtr p)) => Coroutine_ p -> ContDef p
-coroutineDef_ coFn = ContDef { contStart = start
-                       , contCC = contCC_
-                       , contDef = coroutine_
-                       , contModuleDefs = mods
-                       }
-  where coroutine_ = coFn contCC_
-        name = coroutineName coroutine_
-
-        {-
-        -- Function which is just a placeholder:
-        dummy :: Def (t ':-> ())
-        dummy = proc (name ++ "_dummy") _
-        -- The problem is that the next argument in 'dummy' (currently just an
-        -- underscore) must take a number of arguments that matches the pattern
-        -- of arguments in 't', and I have no idea how to do this.
-        -- For now I'm using 'importProc' in 'start' and referring to a made-up
-        -- function.
-        -}
-
-        start = proc (name ++ "_start") $ body $ do
-          -- The coroutine ignores this parameter, but we must pass something:
-          call_ impl true $ procPtr $ importProc "dummy" "dummy.h"
-          
-        contCC_ = proc (name ++ "_cont") $ \cc -> body $ do
-          call_ impl true cc
-
-        impl :: Def ('[IBool, ProcPtr p] ':-> ())
-        impl = proc (name ++ "_impl") $ \init exit -> body $ do
-                     --exit' <- local $ ival exit
-                     coroutineRun coroutine_ init exit
-
-        mods = do coroutineDef coroutine_
-                  incl start
-                  incl impl
-                  --incl dummy
 
 -}
