@@ -161,17 +161,19 @@ coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   -- runM here is: MonadLib.WriterT (D.DList AST.Stmt) (MonadLib.ReaderT CoroutineParams (MonadLib.WriterT CoroutineVars (MonadLib.StateT CoroutineState MonadLib.Id))) Goto -> CoroutineParams -> CoroutineState -> (((Goto, t0), (D.DList (AST.Typed String), Map.Map Goto (AST.Expr -> [AST.Stmt]))), CoroutineState)
   initBB = BasicBlock [] $ BranchTo False initLabel
 
+  coroutineType :: AST.Type
+  coroutineType = ivoryArea (Proxy :: Proxy a)
+
+  -- | Return continuation is: ProcPtr ([a] :-> r)]
+  returnContType :: AST.Type
+  returnContType = AST.TyProc AST.TyVoid [coroutineType]
+
   strName = name ++ "_continuation"
   strDef = AST.Struct strName $
            -- State variable:
            AST.Typed stateType stateName :
            -- Return continuation:
-           AST.Typed (AST.TyProc undefined []) returnContName :
-           -- CMH: How do I get the AST.Type constructor for 'a'?
-           -- unwrapExpr gives me an AST.Expr, but that's untyped (ish).
-           -- Likewise unwrapRef for a reference.
-
-           -- All the local variables:
+           AST.Typed returnContType returnContName :
            D.toList localVars
   strTy = AST.TyStruct strName
   cont = AST.Area (name ++ "_cont") False strTy AST.InitZero
