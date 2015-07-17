@@ -47,6 +47,7 @@
 %% \usepackage{bytefield} %jjb, for bit data, not used yet
 \usepackage{hyphenat} %js to control hyphenation
 \usepackage{theorem}
+\usepackage{balance}
 
 \newtheorem{theorem}{Theorem}
 
@@ -106,13 +107,14 @@
 \newcommand{\cd}[1]{\texttt{#1}}
 
 \begin{document}
+\toappear{}
 
 \special{papersize=8.5in,11in}
 \setlength{\pdfpageheight}{\paperheight}
 \setlength{\pdfpagewidth}{\paperwidth}
 
 %% XXX fix when we have the right info
-\conferenceinfo{ICFP~'15}{}
+\conferenceinfo{Haskell Symposium~'15}{}
 \copyrightyear{2015}
 \copyrightdata{}
 \doi{}
@@ -205,6 +207,7 @@ expressed herein are our own.
 % We recommend abbrvnat bibliography style.
 
 \bibliographystyle{abbrvnat}
+\balance
 \bibliography{paper}
 
 % appendices
