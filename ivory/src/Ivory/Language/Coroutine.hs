@@ -87,8 +87,11 @@ coroutine at that point, passing in a value in the process.
 
 {- $implNotes
 
-Coroutines are implemented as a single large C function, mainly as a series of
-branches inside of a single infinite loop.
+This implementation handles a coroutine in the form of a single contiguous
+block of Ivory code.  It turns this block into a single large C function,
+breaking it up into an initialization portion and a series of branches inside
+an infinite loop.  Each branch represents a resume and suspend point within
+that block.
 
 It was mentioned that @yield@ /suspends/ a coroutine for later resumption.
 The state of the computation to be resumed later - that is, its
@@ -132,15 +135,22 @@ data Coroutine a = Coroutine
   , coroutineDef :: ModuleDef
   }
 
+type YieldEff a s1 s2 b = Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)
+type YieldToEff a s1 s2 b = Coroutine a ->
+                            Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)
+-- Probably wrong:
+type YieldFromEff a s1 s2 b = Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)
+
 -- | The definition of a coroutine body, in the form of a function taking one
 -- argument: an Ivory effect that is the @yield@ action which suspends the
 -- coroutine, and sets the point at which 'coroutineRun' resumes it, passing a
 -- value.
 newtype CoroutineBody a =
   CoroutineBody (forall s1 s2 .
-                 (forall b .
-                  Ivory ('Effects (Returns ()) b (Scope s2)) (Ref s1 a)) ->
-                         Ivory (ProcEffects s2 ()) ())
+                 (forall b . YieldEff a s1 s2 b) ->
+                 (forall b . YieldToEff a s1 s2 b) ->
+                 (forall b . YieldFromEff a s1 s2 b) ->
+                 Ivory (ProcEffects s2 ()) ())
 
 -- | Smart constructor for a 'Coroutine'
 coroutine :: forall a. IvoryArea a =>
@@ -150,12 +160,21 @@ coroutine :: forall a. IvoryArea a =>
 coroutine name (CoroutineBody fromYield) = Coroutine { .. }
   where
   ((), CodeBlock { blockStmts = rawCode }) =
-    runIvory $ fromYield $ call (proc yieldName $ body $ return ())
-  -- The above 'call (proc yieldName ...)' is a pseudo-call, returning type
-  -- 'a', that is later extracted in the AST and replaced.
-{- CMH: How would I make another pseudo-call to handle the yield-to function?
-Is yieldTo the right name?  What about yieldBack, or whatever?
--}
+    runIvory $ fromYield yieldCall yieldToCall yieldFromCall
+
+  -- The below calls all are pseudo-calls which code elsewhere extracts from
+  -- the AST and replaces.
+  yieldCall = call $ proc yieldName $ body $ return ()
+  yieldToCall co = call $ proc yieldToName $ body $ return ()
+  -- Now how do I get 'co' somehow into this definition?  I can somehow inject
+  -- it into the name, but this seems a little hackish.  Once I do that, I must
+  -- enable extractLocals to detect this name.  I could somehow put it in the
+  -- arguments, but that may be uglier still.
+  -- It must be this form because it must pass through to the AST somehow.
+  -- This call also becomes a real call to the continuation function of 'co',
+  -- so that information needs to find its way in somehow.  However, we don't
+  -- want to make this something that could be triggered accidentally.
+  yieldFromCall = call $ proc yieldFromName $ body $ return ()
 
   params = CoroutineParams
            { getCont = AST.ExpLabel strTy $ AST.ExpAddrOfGlobal $
@@ -233,6 +252,12 @@ Is yieldTo the right name?  What about yieldBack, or whatever?
 -- it can't collide with a real procedure.
 yieldName :: String
 yieldName = "+yield"
+
+yieldToName :: String
+yieldToName = "+yieldTo"
+
+yieldFromName :: String
+yieldFromName = "+yieldFrom"
 
 -- | Name of the return continuation function
 returnContName :: String
@@ -349,6 +374,9 @@ extractLocals (AST.Call ty mvar name args) rest
       -- XXX: yield takes no arguments and always returns something
       let (Just var, []) = (mvar, args)
       addYield ty var rest
+  | name == AST.NameSym yieldToName = do
+      let (Just var, []) = (mvar, args)
+      addYieldTo ty var rest
   | otherwise = do
       -- All other function calls pass through normally, but have their
       -- arguments run through 'updateTypedExpr' and have their results saved
@@ -467,7 +495,7 @@ addYield ty var rest = do
 -- | Generate the code to turn a @yieldTo@ pseudo-call to yielding control to
 -- another coroutine, and the subsequent resume.
 addYieldTo :: AST.Type -> AST.Var -> CoroutineMonad Terminator ->
-            CoroutineMonad Terminator
+              CoroutineMonad Terminator
 addYieldTo ty var rest = do
   let AST.TyRef derefTy = ty
       AST.VarName varStr = var
@@ -485,9 +513,13 @@ addYieldTo ty var rest = do
   -- Inside of 'coroutine' is contArea which is this struct itself as an
   -- AST.Area.  I could factor this out into a function parametrized over
   -- the coroutine or coroutine name.
+  -- Above is wrong but does build:
   -- returnCont <- MonadLib.asks getCont <*> pure returnContName
+  -- stmt $ AST.RefCopy derefTy returnCont (AST.ExpSym "cmh_dummy")
   after <- makeLabel' =<< getBlock [] rest
-  let resume arg = [AST.RefCopy derefTy cont arg]
+  let resume arg = [ AST.RefCopy derefTy cont arg
+                   --, AST.RefCopy derefTy returnCont arg
+                   ]
   MonadLib.lift $ MonadLib.put (mempty, Map.singleton after resume)
   resumeAt after
 
