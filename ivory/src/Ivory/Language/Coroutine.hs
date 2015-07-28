@@ -30,6 +30,11 @@ function pointer could be null depending on how the coroutine was called.
 is correct.
   * I do not have it being set or used.
 
+Other notes:
+
+  * If coroutine composition is via CPS, then tail calls are everywhere, and I
+may need to look into using trampolines.
+
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
