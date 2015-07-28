@@ -6,11 +6,11 @@ Copyright: (c) 2014 Galois, Inc.
 This is an implementation of coroutines in Ivory.  These coroutines:
 
   * may be suspended and resumed,
-  * are parametrized over any memory-area type ('Area'), /(CMH: Is this right?
-Must it also have IvoryVar?)/
-  * cannot return values, but can receive values when they are resumed,
-  * can have only one instance executing at once, given a particular coroutine
-name and Ivory module.
+  * are parametrized over any memory-area type ('Area'),
+  * cannot return values, but can receive values when they are resumed (though
+this is an incidental detail of the current implementation),
+  * for now, can have only one instance executing at once, given a particular
+coroutine name and Ivory module.
 
 CMH, current work-in-progress:
 
@@ -471,7 +471,8 @@ addLocal ty var = do
   MonadLib.lift $ MonadLib.put (D.singleton $ AST.Typed ty varStr, mempty)
   cont <- contRef var
   var `rewriteTo` do
-    idx <- MonadLib.sets $ \ state -> (derefs state, state { derefs = derefs state + 1 })
+    idx <- MonadLib.sets $ \state ->
+                            (derefs state, state { derefs = derefs state + 1 })
     let var' = AST.VarName $ "cont" ++ show idx
     stmt $ AST.Deref ty var' cont
     return $ AST.ExpVar var'
@@ -536,27 +537,47 @@ stmt s = MonadLib.put $ D.singleton s
 stmts :: AST.Block -> CoroutineMonad ()
 stmts = MonadLib.put . D.fromList
 
--- | Inside of a 'CoroutineMonad', rewrite the given variable name to the
--- contained expression.
-rewriteTo :: AST.Var -> CoroutineMonad AST.Expr -> CoroutineMonad ()
+-- | Add a rewrite to some 'AST.Var', such that references to it are replaced
+-- with execution of the given monadic code, and the value with the supplied
+-- expression. ('addLocal' uses this to ensure that local variables that are
+-- promoted to the global continuation are 'deref'ed before each use. This
+-- 'deref' occurs each time because any intervening @yield@ puts a previous
+-- 'deref' out of scope.)
+rewriteTo :: AST.Var -- ^ Variable to replace
+             -> CoroutineMonad AST.Expr -- ^ New value & statements
+             -> CoroutineMonad ()
 rewriteTo var repl =
   MonadLib.sets_ $ \state -> state
                              { rewrites = Map.insert var repl $ rewrites state }
 
--- | State monad containing a map of updates from variables to expressions
--- (typically for the sake of updating variable references to refer instead to
--- the continuation struct).
+-- | State monad transformer containing 'CoroutineMonad', plus a memoization
+-- table recording which rewrites have already been evaluated for the current
+-- statement.  /(Since an Ivory statement cannot have side effects - such as
+-- storing to the continuation or suspending with 'yield' - we may safely
+-- dereference the continuation variable just once per statement, regardless of
+-- how many subexpressions contain that variable.)/
 type UpdateExpr a = MonadLib.StateT (Map.Map AST.Var AST.Expr) CoroutineMonad a
 
--- | Apply the given variable updates
+-- | Starting from an empty memoization table, run the memoized monadic code
+-- from a sequence of 'updateExpr'.  /(As each statement requires an empty
+-- memoization table, this should be run only on single statements or on
+-- smaller divisions of one, though it may generate redundant 'deref's in the
+-- latter case.)/
 runUpdateExpr :: UpdateExpr a -> CoroutineMonad a
 runUpdateExpr = fmap fst . MonadLib.runStateT Map.empty
 
--- | Updates variable references in the supplied expression (as well as
--- recursively to all sub-expressions) with the updates in 'UpdateExpr'.
+-- | Update an 'AST.Expr' with variable rewrites, applying and updating the
+-- memoization table of rewrites in the process.
 updateExpr :: AST.Expr -> UpdateExpr AST.Expr
 updateExpr ex@(AST.ExpVar var) = do
   updated <- MonadLib.get
+  -- Here's the actual memoizing. If the memo table doesn't already have the
+  -- given variable in it, we try to find it in the rewrites table, and save
+  -- the resulting Expr in the memo table in case we encounter another use of
+  -- the same variable. If it isn't in the rewrites table, it wasn't declared
+  -- in this local scope, so we'll just hope it was global or something and use
+  -- it as-is. And if it was already in the memo table, we don't evaluate the
+  -- monadic action in the rewrites table a second time.
   case Map.lookup var updated of
     Just ex' -> return ex'
     Nothing -> do
@@ -576,8 +597,7 @@ updateExpr (AST.ExpOp op args) =
   AST.ExpOp op <$> mapM updateExpr args
 updateExpr ex = return ex
 
--- | Update an initializer with the variable replacements in the given
--- 'UpdateExpr'
+-- | Basically 'updateExpr', but on an initializer.
 updateInit :: AST.Init -> UpdateExpr AST.Init
 updateInit AST.InitZero = return AST.InitZero
 updateInit (AST.InitExpr ty ex) =
@@ -591,8 +611,7 @@ updateInit (AST.InitArray elems) =
   -- An 'AST.InitArray' is a list of 'AST.Init' which we must recurse over:
   AST.InitArray <$> mapM updateInit elems
 
--- | Update variable references in the supplied typed expression (and
--- recursively in all its sub-expressions) with the updates in 'UpdateExpr'.
+-- | Basically 'updateExpr', but on a typed expression.
 updateTypedExpr :: AST.Typed AST.Expr -> UpdateExpr (AST.Typed AST.Expr)
 updateTypedExpr (AST.Typed ty ex) = AST.Typed ty <$> updateExpr ex
 
