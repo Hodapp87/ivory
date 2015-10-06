@@ -13,12 +13,15 @@ build-type:          Simple
 cabal-version:       >= 1.10
 license:             BSD3
 license-file:        LICENSE
+extra-source-files:  src/Ivory/Language/Syntax/Concrete/Lexer.x,
+                     src/Ivory/Language/Syntax/Concrete/Parser.y
 source-repository    this
   type:     git
   location: https://github.com/GaloisInc/ivory
   tag:      hackage-0100
-
+  
 library
+  build-tools: happy, alex
   exposed-modules:      Ivory.Language,
                         Ivory.Language.Effects,
                         Ivory.Language.Monad,
@@ -56,10 +59,8 @@ library
                         Ivory.Language.SizeOf,
                         Ivory.Language.String,
                         Ivory.Language.Struct,
-                        Ivory.Language.Syntax.Concrete.Lexer,
                         Ivory.Language.Syntax.Concrete.Lexeme,
                         Ivory.Language.Syntax.Concrete.Location,
-                        Ivory.Language.Syntax.Concrete.Parser,
                         Ivory.Language.Syntax.Concrete.ParseAST,
                         Ivory.Language.Syntax.Concrete.ParseCore,
                         Ivory.Language.Syntax.Concrete.Pretty,
@@ -79,6 +80,8 @@ library
                         Ivory.Language.Syntax.Names,
                         Ivory.Language.Type,
                         Ivory.Language.Uint
+  other-modules:        Ivory.Language.Syntax.Concrete.Lexer,
+                        Ivory.Language.Syntax.Concrete.Parser
   build-depends:        base >= 4.6,
                         pretty >= 1.1,
                         containers >= 0.5,
