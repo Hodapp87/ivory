@@ -1,16 +1,16 @@
 flags: {}
 packages:
 - ivory-stdlib/
-- ivory-model-check/
+#- ivory-model-check/
 - ivory-opts/
-- ivory-examples/
+#- ivory-examples/
 #- ivory-backend-acl2/
 - ivory-serialize/
 - ivory/
 - ivory-hw/
-- ivory-eval/
+#- ivory-eval/
 - ivory-backend-c/
-- ivory-quickcheck/
+#- ivory-quickcheck/
 - ivory-artifact/
 extra-deps:
 - acl2-0.0.1
