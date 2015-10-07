@@ -1,0 +1,18 @@
+flags: {}
+packages:
+- ivory-stdlib/
+- ivory-model-check/
+- ivory-opts/
+- ivory-examples/
+#- ivory-backend-acl2/
+- ivory-serialize/
+- ivory/
+- ivory-hw/
+- ivory-eval/
+- ivory-backend-c/
+- ivory-quickcheck/
+- ivory-artifact/
+extra-deps:
+- acl2-0.0.1
+- ghc-srcspan-plugin-0.2.1.0
+resolver: lts-2.21
