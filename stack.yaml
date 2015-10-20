@@ -1,17 +1,21 @@
 flags: {}
 packages:
 - ivory-stdlib/
-#- ivory-model-check/
+- ivory-model-check/
 - ivory-opts/
-#- ivory-examples/
+- ivory-examples/
 #- ivory-backend-acl2/
 - ivory-serialize/
 - ivory/
 - ivory-hw/
-#- ivory-eval/
+- ivory-eval/
 - ivory-backend-c/
-#- ivory-quickcheck/
+- ivory-quickcheck/
 - ivory-artifact/
+- location:
+    git: https://github.com/GaloisInc/ivory-backend-acl2.git
+    # git: git@github.com:GaloisInc/ivory-backend-acl2.git
+    commit: fa6667b29d24da34e7f35448d7598cd704dde9ec
 extra-deps:
 - acl2-0.0.1
 - ghc-srcspan-plugin-0.2.1.0
