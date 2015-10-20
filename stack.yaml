@@ -4,7 +4,6 @@ packages:
 - ivory-model-check/
 - ivory-opts/
 - ivory-examples/
-#- ivory-backend-acl2/
 - ivory-serialize/
 - ivory/
 - ivory-hw/
